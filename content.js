@@ -497,13 +497,15 @@
 
       // requestId để hủy request phía background khi timeout (NPT-007) — timeout
       // phía content mà không hủy thì request trả phí vẫn chạy ngầm + fallback chồng lên.
+      // 190s: phải RỘNG HƠN trần request provider trong background (Deploy suy luận
+      // sâu được cấp 120s), nếu không content tự huỷ trước khi provider kịp trả lời.
       const requestId = `${Date.now()}-${++providerRequestSeq}-${Math.random().toString(36).slice(2, 8)}`;
       try {
         const response = await new Promise(resolve => {
           const timer = setTimeout(() => {
             chrome.runtime.sendMessage({ type: 'cancelProviderTranslate', requestId }).catch(() => {});
             resolve(null);
-          }, 65000);
+          }, 190000);
           chrome.runtime.sendMessage({
             type: 'providerTranslate',
             payload: {
@@ -2249,7 +2251,7 @@
     updateActiveButton();
   }
 
-  /* ===================== DỊCH ẢNH (OCR qua Gemini vision) =====================
+  /* ===================== DỊCH ẢNH (OCR qua Gemini/Deploy vision) =====================
    * Background gửi: imageTranslateStart {srcUrl} và
    * imageTranslateResult {srcUrl, ok, lines:[{original,translated}] | error}.
    * Panel shadow DOM neo cạnh <img> khớp srcUrl; không thấy ảnh thì hiện góc
@@ -2702,7 +2704,7 @@
     loading.className = 'loading';
     const spinner = document.createElement('span');
     spinner.className = 'spinner';
-    loading.append(spinner, document.createTextNode('Đang đọc ảnh bằng Gemini…'));
+    loading.append(spinner, document.createTextNode('Đang đọc ảnh…'));
     imageBody.replaceChildren(loading);
 
     positionImagePanel(srcUrl);

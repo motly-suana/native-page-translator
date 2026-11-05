@@ -27,6 +27,7 @@ const BUILTIN_ORIGINS = new Set([
   'https://generativelanguage.googleapis.com',
   'https://api-free.deepl.com',
   'https://api.deepl.com',
+  'https://api-sf1-cdn.deploy.com',
 ]);
 
 // Không seed key cứng trong mã nguồn (chuẩn Chrome Web Store).
@@ -156,7 +157,7 @@ async function rawFetch(payload) {
   if (!['GET', 'POST'].includes(method)) throw new Error('Blocked HTTP method');
 
   const controller = new AbortController();
-  const timeout = Math.max(1000, Math.min(Number(payload?.timeout) || 30000, 70000));
+  const timeout = Math.max(1000, Math.min(Number(payload?.timeout) || 30000, MAX_REQUEST_TIMEOUT_MS));
   const timer = setTimeout(() => controller.abort(), timeout);
 
   // Abort từ bên ngoài (content timeout/navigation gửi cancelProviderTranslate) —
@@ -228,7 +229,8 @@ async function providerFetchText(request, signal) {
     url: request.url,
     headers: request.headers,
     data: request.body,
-    timeout: 60000,
+    // Request tự khai timeout (Deploy suy luận sâu chạy lâu hơn 60s mặc định).
+    timeout: Number(request.timeout) > 0 ? Number(request.timeout) : 60000,
     signal,
   });
   if (!response.ok && response.networkError) {
@@ -385,6 +387,10 @@ const MAX_BATCH_ITEMS = 64;
 const MAX_BATCH_CHARS = 20000;
 // Cap đọc response text (providers) — chống stream payload khổng lồ DoS worker.
 const MAX_RESPONSE_TEXT_BYTES = 4 * 1024 * 1024;
+// Trần timeout một request provider. Suy luận sâu ('max') đo được >90s cho một
+// bài khó, nên trần phải rộng hơn 70s cũ; service worker vẫn bị Chrome dọn khi
+// rảnh nên không có rủi ro giữ worker sống vô hạn.
+const MAX_REQUEST_TIMEOUT_MS = 240000;
 // Giới hạn tóm tắt trang: text quá dài bị cắt bớt trước khi gửi LLM.
 const MAX_SUMMARY_CHARS = 16000;
 
@@ -687,7 +693,8 @@ async function broadcastToFrames(tabId, message) {
 }
 
 /* ------------------------------------------------------------------
- * Dịch ảnh: menu chuột phải trên ảnh -> OCR + dịch qua Gemini vision.
+ * Dịch ảnh: menu chuột phải trên ảnh -> OCR + dịch qua provider đọc được ảnh
+ * (Gemini vision / Deploy.com image_url).
  * Fetch ảnh cần host permission của origin chứa ảnh — context menu click
  * là user gesture nên chrome.permissions.request gọi được ngay tại đây.
  * ------------------------------------------------------------------ */
@@ -704,7 +711,7 @@ function registerImageContextMenu() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: IMAGE_MENU_ID,
-      title: 'Dịch ảnh này (Gemini)',
+      title: 'Dịch ảnh này (AI vision)',
       contexts: ['image'],
     });
     chrome.contextMenus.create({
@@ -835,8 +842,8 @@ async function handleImageTranslate(info, tab) {
     await send({ type: 'imageTranslateResult', srcUrl, ok: true, lines: result.lines, mimeType, imageBase64 });
   } catch (error) {
     let friendly = error?.message || String(error);
-    if (friendly.includes('IMAGE_NEEDS_GEMINI')) {
-      friendly = 'Dịch ảnh cần API key Gemini (bật trong Cài đặt)';
+    if (friendly.includes('IMAGE_NEEDS_VISION') || friendly.includes('IMAGE_NEEDS_GEMINI')) {
+      friendly = 'Dịch ảnh cần API key đọc được ảnh (Gemini hoặc Deploy.com — bật trong Cài đặt)';
     }
     await send({ type: 'imageTranslateResult', srcUrl, ok: false, error: friendly });
   }
@@ -904,8 +911,8 @@ async function handleOcrProcessScreenshot(payload, sender) {
     return { ok: true, text: result.text, lines: result.lines };
   } catch (error) {
     let friendly = error?.message || String(error);
-    if (friendly.includes('IMAGE_NEEDS_GEMINI')) {
-      friendly = 'Quét chữ cần API key Gemini (bật trong Cài đặt)';
+    if (friendly.includes('IMAGE_NEEDS_VISION') || friendly.includes('IMAGE_NEEDS_GEMINI')) {
+      friendly = 'Quét chữ cần API key đọc được ảnh (Gemini hoặc Deploy.com — bật trong Cài đặt)';
     }
     return { ok: false, error: friendly };
   }
@@ -947,12 +954,12 @@ async function handleQaSolveQuestion(payload, sender) {
     };
   } catch (error) {
     let friendly = error?.message || String(error);
-    if (friendly.includes('IMAGE_NEEDS_GEMINI')) {
-      friendly = 'Giải câu hỏi bằng ảnh cần bật API key Gemini trong Cài đặt';
+    if (friendly.includes('IMAGE_NEEDS_VISION') || friendly.includes('IMAGE_NEEDS_GEMINI')) {
+      friendly = 'Giải câu hỏi bằng ảnh cần bật API key đọc được ảnh (Gemini hoặc Deploy.com) trong Cài đặt';
     } else if (friendly.includes('QA_REQUIRES_LLM')) {
       friendly = 'Cần cài đặt API key (Gemini hoặc OpenAI) trong Cài đặt để giải câu hỏi';
     } else if (/429|giới hạn tốc độ|rate limit|resource_exhausted/i.test(friendly)) {
-      friendly = '⚠️ API Key tạm thời chạm giới hạn tốc độ (Rate Limit 429). Bạn hãy đợi vài giây rồi thử lại, hoặc thêm 1-2 API key Gemini phụ trong Cài đặt để tự động xoay tua không bị gián đoạn.';
+      friendly = '⚠️ API Key tạm thời chạm giới hạn tốc độ (Rate Limit 429). Bạn hãy đợi vài giây rồi thử lại, hoặc thêm 1-2 API key phụ (Gemini/Deploy) trong Cài đặt để tự động xoay tua không bị gián đoạn.';
     }
     return { ok: false, error: friendly };
   }

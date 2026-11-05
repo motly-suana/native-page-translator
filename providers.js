@@ -9,7 +9,7 @@
   'use strict';
 
   const CONFIG_STORAGE_KEY = 'tm-multi-provider-config';
-  const PROVIDER_ORDER = ['deepl', 'gemini', 'openai'];
+  const PROVIDER_ORDER = ['deepl', 'gemini', 'openai', 'deploy'];
 
   const PROVIDER_DEFS = {
     deepl: {
@@ -49,7 +49,77 @@
       defaultModel: 'gpt-4o-mini',
       defaultUrl: 'https://api.openai.com/v1/chat/completions',
     },
+    deploy: {
+      id: 'deploy',
+      label: 'Deploy.com API',
+      keyPlaceholder: 'Token API deploy.com (dán nguyên chuỗi, giữ cả dấu "==")',
+      needsModel: true,
+      needsUrl: false,
+      defaultModel: 'deepseek-ai/deepseek-v4.1-flash-1017',
+      suggestedModels: [
+        'deepseek-ai/deepseek-v4.1-flash-1017',
+        'zai-org/glm-5.3-flash',
+      ],
+      site: 'https://deploy.com',
+    },
   };
+
+  /* ------------------------------------------------------------------
+   * Deploy.com API — endpoint OpenAI-compatible, model dạng vendor/model.
+   * Khác biệt so với slot 'openai' tự nhập:
+   *  - URL cố định (chỉ override khi người dùng ghi đè provider.url)
+   *  - luôn gửi reasoning_effort, mặc định 'max' (suy luận sâu nhất)
+   *  - đọc được ảnh (image_url dạng data URL) nên dùng được cho dịch ảnh/OCR
+   * ------------------------------------------------------------------ */
+  const DEPLOY_API_BASE = 'https://api-sf1-cdn.deploy.com/api/v1';
+  const DEPLOY_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  // Giải bài / câu hỏi khó: suy luận sâu nhất.
+  const DEPLOY_DEFAULT_REASONING = 'max';
+  /* Dịch trang / dịch ảnh / OCR / tóm tắt: 'none'. Đo thật trên API cho thấy
+   * 'max' ở các việc này chậm 5-8x (12.5s vs 1.6s cho 6 câu) mà bản dịch không
+   * khá hơn, còn bounding box ảnh lệch NHIỀU hơn (sai số TB 63-84 vs 36-41). */
+  const DEPLOY_TRANSLATE_REASONING = 'none';
+
+  function deployEndpoint(providerConfig) {
+    const override = String(providerConfig?.url || '').trim();
+    return override || `${DEPLOY_API_BASE}/chat/completions`;
+  }
+
+  // Mức suy luận cho giải bài: override của caller > cấu hình > 'max'.
+  function deployReasoningEffort(providerConfig, override) {
+    const wanted = String(override || '').trim().toLowerCase();
+    if (DEPLOY_REASONING_EFFORTS.includes(wanted)) return wanted;
+    const configured = String(providerConfig?.reasoningEffort || '').trim().toLowerCase();
+    return DEPLOY_REASONING_EFFORTS.includes(configured) ? configured : DEPLOY_DEFAULT_REASONING;
+  }
+
+  // Mức suy luận cho dịch/OCR: cấu hình riêng, mặc định 'none' cho nhanh.
+  function deployTranslateReasoning(providerConfig) {
+    const configured = String(providerConfig?.translateReasoningEffort || '').trim().toLowerCase();
+    return DEPLOY_REASONING_EFFORTS.includes(configured) ? configured : DEPLOY_TRANSLATE_REASONING;
+  }
+
+  // Content dạng chat: ảnh đi kèm thành part image_url (data URL base64).
+  function chatUserContent(prompt, image) {
+    if (!image?.imageBase64) return prompt;
+    return [
+      { type: 'text', text: String(prompt || '') },
+      {
+        type: 'image_url',
+        image_url: { url: `data:${image.mimeType || 'image/png'};base64,${image.imageBase64}` },
+      },
+    ];
+  }
+
+  // Provider đọc được ảnh: Gemini (inline_data) và Deploy (image_url).
+  function visionProviderIds(config) {
+    return providerIdsOf(config).filter(id => {
+      const kind = providerKind(id);
+      if (kind !== 'gemini' && kind !== 'deploy') return false;
+      const provider = config?.providers?.[id];
+      return Boolean(provider?.enabled && provider.keys?.length);
+    });
+  }
 
   /* ------------------------------------------------------------------
    * Nhiều endpoint OpenAI-compatible chạy song song.
@@ -168,6 +238,11 @@
       ...(def.needsUrl ? { name: '' } : {}),
       ...(def.needsModel ? { model: def.defaultModel } : {}),
       ...(providerKind(id) === 'gemini' ? { googleSearch: true, extendedThinking: false } : {}),
+      // Deploy: mặc định suy luận sâu nhất (đọc được ảnh qua image_url).
+      ...(providerKind(id) === 'deploy' ? {
+        reasoningEffort: DEPLOY_DEFAULT_REASONING,
+        translateReasoningEffort: DEPLOY_TRANSLATE_REASONING,
+      } : {}),
       ...(def.needsUrl ? { url: def.defaultUrl, format: 'auto' } : {}),
     };
   }
@@ -359,6 +434,8 @@
     if (/^AIza[\w-]{10,}$/.test(value) || /^AQ\./.test(value)) return 'gemini';
     if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?::[a-z]{2})?$/i.test(value)) return 'deepl';
     if (/^(?:sk|gsk|xai|hf|or|pk)[-_]/i.test(value)) return 'openai';
+    // Token deploy.com là base64 thô kết thúc bằng "==" (vd: AbCdEfGhIjKlMnOpQrStUv==).
+    if (/^[A-Za-z0-9+/]{16,}={2}$/.test(value) && value.length % 4 === 0) return 'deploy';
     return '';
   }
 
@@ -410,6 +487,11 @@
         enabled: incoming.enabled !== undefined ? Boolean(incoming.enabled) : base.enabled,
         keys: normalizeKeyList(keys),
         ...(base.name !== undefined ? { name: String(incoming.name || '').trim().slice(0, 40) } : {}),
+        // Mức suy luận của Deploy: giá trị lạ trong config không được đẩy lên API.
+        ...(providerKind(id) === 'deploy' ? {
+          reasoningEffort: deployReasoningEffort(incoming),
+          translateReasoningEffort: deployTranslateReasoning(incoming),
+        } : {}),
       };
     }
     return config;
@@ -555,6 +637,55 @@
     return { url, model, format, headers };
   }
 
+  /* Request deploy.com: chat/completions + reasoning_effort + (tuỳ chọn) ảnh.
+   * reasoning_effort LUÔN gửi để mức suy luận là hành vi mặc định thật, không
+   * phụ thuộc việc server tự bật reasoning hay không (đo được: 'max' sinh
+   * reasoning_tokens cao nhất, 'none' = 0).
+   *
+   * `mode` quyết định mức mặc định khi providerConfig không ghi đè:
+   *   'translate' (dịch trang, dịch ảnh, OCR, tóm tắt) -> 'none'  (nhanh, chính xác hơn)
+   *   'solve'     (Quick Solver)                        -> 'max'   (suy luận sâu nhất)
+   *
+   * KHÔNG gửi max_tokens trừ khi caller yêu cầu rõ: token suy luận bị tính
+   * chung vào trần đó, nên trần thấp làm model nghĩ hết quota rồi trả content
+   * RỖNG (đo thật: max_tokens 8000 -> 8001 reasoning, content rỗng; bỏ trần ->
+   * cùng câu hỏi trả lời đầy đủ). Chặn thời gian bằng timeout thay vì trần token. */
+  function buildDeployRequest({ providerConfig, apiKey, system, prompt, image, maxTokens, temperature, reasoningEffort, timeoutMs, mode }) {
+    const model = String(providerConfig?.model || PROVIDER_DEFS.deploy.defaultModel).trim();
+    const effort = String(mode || 'translate') === 'solve'
+      ? deployReasoningEffort(providerConfig, reasoningEffort)
+      : deployTranslateReasoning(providerConfig);
+    const payload = {
+      model,
+      messages: [
+        { role: 'system', content: String(system || '') },
+        {
+          role: 'user',
+          content: image ? chatUserContent(prompt, image) : String(prompt || ''),
+        },
+      ],
+      stream: false,
+      reasoning_effort: effort,
+    };
+    if (Number.isFinite(maxTokens)) payload.max_tokens = maxTokens;
+    if (Number.isFinite(temperature)) payload.temperature = temperature;
+
+    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    const token = String(apiKey || '').trim();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    // Dịch dùng 'none' nên thường xong trong vài giây; vẫn giữ trần rộng để
+    // người dùng chọn mức cao trong Cài đặt mà không bị cắt ngang.
+    const defaultTimeout = String(mode || 'translate') === 'solve' ? 200000 : 120000;
+    return {
+      url: deployEndpoint(providerConfig),
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      openaiFormat: 'chat',
+      timeout: Number(timeoutMs) > 0 ? Number(timeoutMs) : defaultTimeout,
+    };
+  }
+
   function buildRequest({ providerId, providerConfig, apiKey, source, context, tone }) {
     const kind = providerKind(providerId);
     const instructions = buildNativeInstructions(tone);
@@ -626,6 +757,10 @@
       }
 
       return { url, method: 'POST', headers, body: JSON.stringify(payload), openaiFormat: format };
+    }
+
+    if (kind === 'deploy') {
+      return buildDeployRequest({ providerConfig, apiKey, system: instructions, prompt });
     }
 
     throw new Error(`Provider không hỗ trợ: ${providerId}`);
@@ -819,7 +954,15 @@
     }
 
     if (!text) {
-      return { kind: 'providerFailed', message: `${def.label}: không nhận diện được trường bản dịch` };
+      // Reasoning model có thể nghĩ hết sạch trần token rồi trả content rỗng:
+      // báo đúng nguyên nhân thay vì "không nhận diện được trường bản dịch".
+      const truncated = data?.choices?.[0]?.finish_reason === 'length';
+      return {
+        kind: 'providerFailed',
+        message: truncated
+          ? `${def.label}: model nghĩ hết trần token nên không còn chỗ trả lời (tăng max_tokens hoặc giảm mức suy luận)`
+          : `${def.label}: không nhận diện được trường bản dịch`,
+      };
     }
 
     return { kind: 'ok', text };
@@ -1032,6 +1175,10 @@
       }
 
       return { url, method: 'POST', headers, body: JSON.stringify(payload), openaiFormat: format };
+    }
+
+    if (kind === 'deploy') {
+      return buildDeployRequest({ providerConfig, apiKey, system: instructions, prompt });
     }
 
     throw new Error(`Provider không hỗ trợ: ${providerId}`);
@@ -1381,6 +1528,11 @@
       return { url, method: 'POST', headers, body: JSON.stringify(payload), openaiFormat: format };
     }
 
+    if (kind === 'deploy') {
+      // Không đặt trần token: reasoning 'max' ăn chung trần, trần thấp -> content rỗng.
+      return buildDeployRequest({ providerConfig, apiKey, system: instructions, prompt });
+    }
+
     throw new Error(`Provider không hỗ trợ: ${providerId}`);
   }
 
@@ -1491,8 +1643,8 @@
   function buildQaRequest({ providerId, providerConfig, apiKey, text, imageBase64, mimeType, extendedThinking, thinkingLevel, codeExecution }) {
     const kind = providerKind(providerId);
     if (kind === 'deepl') throw new Error('QA_REQUIRES_LLM');
-    if (imageBase64 && kind !== 'gemini') {
-      throw new Error('IMAGE_NEEDS_GEMINI');
+    if (imageBase64 && kind !== 'gemini' && kind !== 'deploy') {
+      throw new Error('IMAGE_NEEDS_VISION');
     }
 
     const instructions = buildQaInstructions();
@@ -1576,6 +1728,20 @@
       return { url, method: 'POST', headers, body: JSON.stringify(payload), openaiFormat: format };
     }
 
+    if (kind === 'deploy') {
+      return buildDeployRequest({
+        providerConfig,
+        apiKey,
+        system: instructions,
+        prompt,
+        image: imageBase64 ? { imageBase64, mimeType } : null,
+        // Giải bài: suy luận sâu nhất. Đo được ca khó tới ~280s nên cho 200s
+        // (trần background là 240s) thay vì 120s dùng cho dịch.
+        mode: 'solve',
+        timeoutMs: 200000,
+      });
+    }
+
     throw new Error(`Provider không hỗ trợ: ${providerId}`);
   }
 
@@ -1584,11 +1750,13 @@
 
     let eligibleProviders = {};
     if (imageBase64) {
-      const gemini = config?.providers?.gemini;
-      if (!gemini?.enabled || !gemini.keys?.length) {
-        throw new Error('IMAGE_NEEDS_GEMINI');
+      // Ảnh: chỉ provider đọc được ảnh (Gemini inline_data / Deploy image_url).
+      for (const id of visionProviderIds(config)) {
+        eligibleProviders[id] = config.providers[id];
       }
-      eligibleProviders = { gemini };
+      if (!Object.keys(eligibleProviders).length) {
+        throw new Error('IMAGE_NEEDS_VISION');
+      }
     } else {
       for (const id of providerIdsOf(config)) {
         if (providerKind(id) === 'deepl') continue;
@@ -1599,7 +1767,7 @@
 
     const eligibleIds = Object.keys(eligibleProviders);
     if (!eligibleIds.length) {
-      throw new Error(imageBase64 ? 'IMAGE_NEEDS_GEMINI' : 'QA_REQUIRES_LLM');
+      throw new Error(imageBase64 ? 'IMAGE_NEEDS_VISION' : 'QA_REQUIRES_LLM');
     }
 
     const solverConfig = {
@@ -1768,9 +1936,11 @@
     });
 
     const isFallback = Boolean(outcome.verdict?.fallbackUsed || outcome.fallbackUsed);
+    // Nhãn "3.8 Extended" chỉ đúng cho Gemini; Deploy tự mang reasoning_effort riêng.
+    const geminiThinking = extendedThinking && providerKind(outcome.provider) === 'gemini';
     const finalProviderLabel = isFallback
       ? `${outcome.providerLabel} (Flash Lite Fallback)`
-      : (extendedThinking ? `${outcome.providerLabel} (3.8 Extended)` : outcome.providerLabel);
+      : (geminiThinking ? `${outcome.providerLabel} (3.8 Extended)` : outcome.providerLabel);
 
     return {
       answer: String(outcome.verdict?.text || '').trim(),
@@ -1780,21 +1950,33 @@
   }
 
   /* ------------------------------------------------------------------
-   * Dịch ảnh (OCR + dịch) qua Gemini vision. CHỈ gemini hỗ trợ ảnh —
-   * deepl/openai bị bỏ qua dù đang enabled.
+   * Dịch ảnh (OCR + dịch). Provider đọc được ảnh: Gemini (inline_data) và
+   * Deploy.com (image_url). Deepl/OpenAI-compatible bị bỏ qua dù đang bật.
    * ------------------------------------------------------------------ */
   const VISION_TARGET = { vi: 'Vietnamese', en: 'English' };
 
   // Dựng request Gemini kèm ảnh inline base64 (part inline_data, snake_case
   // theo chuẩn REST v1beta của Google).
-  function buildVisionRequest({ providerConfig, apiKey, mimeType, imageBase64, targetLanguage }) {
+  function buildVisionRequest({ providerId = 'gemini', providerConfig, apiKey, mimeType, imageBase64, targetLanguage }) {
     const targetName = VISION_TARGET[String(targetLanguage || '').toLowerCase()];
     if (!targetName) throw new Error('Ngôn ngữ đích không hỗ trợ');
 
-    const rawModel = String(providerConfig?.model || PROVIDER_DEFS.gemini.defaultModel).trim();
-    const model = rawModel.replace(/^models\//i, '');
     const instructions = `You are an OCR + translation engine. Transcribe every visible text line in the image in reading order, then translate each line into ${targetName} naturally. Return ONLY a JSON array [{"box":[ymin,xmin,ymax,xmax],"original":"...","translated":"..."}]. "box" is the bounding box of that text line in the image: 4 integers normalized to the 0-1000 range, in ymin,xmin,ymax,xmax order. If no text found return [].`;
     const prompt = `Transcribe the text in this image with per-line bounding boxes and translate it into ${targetName}.`;
+
+    if (providerKind(providerId) === 'deploy') {
+      return buildDeployRequest({
+        providerConfig,
+        apiKey,
+        system: instructions,
+        prompt,
+        image: { imageBase64, mimeType: mimeType || 'image/png' },
+        temperature: 0.2,
+      });
+    }
+
+    const rawModel = String(providerConfig?.model || PROVIDER_DEFS.gemini.defaultModel).trim();
+    const model = rawModel.replace(/^models\//i, '');
 
     return {
       url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
@@ -1819,12 +2001,12 @@
     };
   }
 
-  // Parse mảng [{original, translated, box?}] từ text Gemini trả về (tái dùng
+  // Parse mảng [{original, translated, box?}] từ text model trả về (tái dùng
   // parseJsonArrayText: strip fence ```json, cắt [ đầu ] cuối). Lỗi -> throw.
   // box = [ymin,xmin,ymax,xmax] chuẩn hóa 0-1000; thiếu/sai -> null (không vẽ đè dòng đó).
-  function parseVisionLines(raw) {
+  function parseVisionLines(raw, providerLabel = 'Gemini') {
     const parsed = parseJsonArrayText(raw);
-    if (!parsed) throw new Error('Gemini: không parse được mảng OCR từ ảnh');
+    if (!parsed) throw new Error(`${providerLabel}: không parse được mảng OCR từ ảnh`);
     return parsed
       .filter(item => item && typeof item.original === 'string' && typeof item.translated === 'string')
       .map(item => ({
@@ -1837,12 +2019,24 @@
       .filter(item => item.original || item.translated);
   }
 
-  // Dựng request OCR thuần bằng Gemini vision (không dịch).
-  function buildOcrVisionRequest({ providerConfig, apiKey, mimeType, imageBase64 }) {
-    const rawModel = String(providerConfig?.model || PROVIDER_DEFS.gemini.defaultModel).trim();
-    const model = rawModel.replace(/^models\//i, '');
+  // Dựng request OCR thuần (không dịch). Gemini -> inline_data, Deploy -> image_url.
+  function buildOcrVisionRequest({ providerId = 'gemini', providerConfig, apiKey, mimeType, imageBase64 }) {
     const instructions = `You are an accurate OCR engine. Transcribe all visible text in this image accurately and in natural reading order. Preserve original line breaks, punctuation, numbers, and exact Vietnamese diacritics. Do not translate, explain, or add commentary. Return ONLY the transcribed text.`;
     const prompt = `Transcribe all text visible in this image accurately.`;
+
+    if (providerKind(providerId) === 'deploy') {
+      return buildDeployRequest({
+        providerConfig,
+        apiKey,
+        system: instructions,
+        prompt,
+        image: { imageBase64, mimeType: mimeType || 'image/png' },
+        temperature: 0.1,
+      });
+    }
+
+    const rawModel = String(providerConfig?.model || PROVIDER_DEFS.gemini.defaultModel).trim();
+    const model = rawModel.replace(/^models\//i, '');
 
     return {
       url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
@@ -1894,30 +2088,32 @@
     return text.split('\n').map(line => line.trim()).filter(Boolean).map(line => ({ text: line }));
   }
 
-  // OCR thuần (không dịch) qua rotation key. Ép config chỉ còn gemini.
+  // OCR thuần (không dịch) qua rotation key. Chỉ còn các provider đọc được ảnh.
   async function ocrVisionWithRotation({ config, mimeType, imageBase64, fetchText, keyState, now, sleep }) {
     if (!imageBase64) throw new Error('Không có dữ liệu ảnh');
 
-    const gemini = config?.providers?.gemini;
-    if (!gemini?.enabled || !gemini.keys?.length) {
-      throw new Error('IMAGE_NEEDS_GEMINI');
+    const visionIds = visionProviderIds(config);
+    if (!visionIds.length) {
+      throw new Error('IMAGE_NEEDS_VISION');
     }
-    const geminiOnlyConfig = {
+    const visionConfig = {
       ...config,
-      preferred: 'gemini',
-      providers: { gemini },
+      preferred: visionIds.includes(config?.preferred) ? config.preferred : visionIds[0],
+      providers: Object.fromEntries(visionIds.map(id => [id, config.providers[id]])),
     };
 
     const outcome = await withKeyRotation({
-      config: geminiOnlyConfig,
+      config: visionConfig,
       keyState,
       now,
       sleep,
-      attempt: async ({ providerConfig, apiKey }) => {
-        const request = buildOcrVisionRequest({ providerConfig, apiKey, mimeType, imageBase64 });
+      attempt: async ({ providerId, providerConfig, providerLabel, apiKey }) => {
+        const request = buildOcrVisionRequest({ providerId, providerConfig, apiKey, mimeType, imageBase64 });
         const response = await fetchText(request);
         const verdict = classifyResponse({
-          providerId: 'gemini',
+          providerId,
+          providerLabel,
+          openaiFormat: request?.openaiFormat,
           status: response.status,
           bodyText: response.bodyText,
           retryAfterMs: response.retryAfterMs,
@@ -1939,32 +2135,34 @@
     };
   }
 
-  // Rotation key giống translateBatchWithRotation nhưng ép config chỉ còn gemini.
+  // Rotation key giống translateBatchWithRotation nhưng chỉ còn provider đọc ảnh.
   async function translateVisionWithRotation({ config, mimeType, imageBase64, targetLanguage, fetchText, keyState, now, sleep }) {
     if (!imageBase64) throw new Error('Không có dữ liệu ảnh');
     const target = String(targetLanguage || 'vi').toLowerCase();
     if (!VISION_TARGET[target]) throw new Error('Ngôn ngữ đích không hỗ trợ');
 
-    const gemini = config?.providers?.gemini;
-    if (!gemini?.enabled || !gemini.keys?.length) {
-      throw new Error('IMAGE_NEEDS_GEMINI');
+    const visionIds = visionProviderIds(config);
+    if (!visionIds.length) {
+      throw new Error('IMAGE_NEEDS_VISION');
     }
-    const geminiOnlyConfig = {
+    const visionConfig = {
       ...config,
-      preferred: 'gemini',
-      providers: { gemini },
+      preferred: visionIds.includes(config?.preferred) ? config.preferred : visionIds[0],
+      providers: Object.fromEntries(visionIds.map(id => [id, config.providers[id]])),
     };
 
     const outcome = await withKeyRotation({
-      config: geminiOnlyConfig,
+      config: visionConfig,
       keyState,
       now,
       sleep,
-      attempt: async ({ providerConfig, apiKey }) => {
-        const request = buildVisionRequest({ providerConfig, apiKey, mimeType, imageBase64, targetLanguage: target });
+      attempt: async ({ providerId, providerConfig, providerLabel, apiKey }) => {
+        const request = buildVisionRequest({ providerId, providerConfig, apiKey, mimeType, imageBase64, targetLanguage: target });
         const response = await fetchText(request);
         const verdict = classifyResponse({
-          providerId: 'gemini',
+          providerId,
+          providerLabel,
+          openaiFormat: request?.openaiFormat,
           status: response.status,
           bodyText: response.bodyText,
           retryAfterMs: response.retryAfterMs,
@@ -1974,7 +2172,7 @@
     });
 
     return {
-      lines: parseVisionLines(outcome.verdict.text),
+      lines: parseVisionLines(outcome.verdict.text, outcome.providerLabel),
       provider: outcome.provider,
       providerLabel: outcome.providerLabel,
       keyMasked: outcome.keyMasked,
@@ -1986,6 +2184,10 @@
     PROVIDER_ORDER,
     PROVIDER_DEFS,
     TONES,
+    DEPLOY_API_BASE,
+    DEPLOY_DEFAULT_REASONING,
+    DEPLOY_TRANSLATE_REASONING,
+    DEPLOY_REASONING_EFFORTS,
     normalizeConfig,
     normalizeKeyList,
     parseKeysInput,
@@ -2001,6 +2203,7 @@
     MAX_CUSTOM_PROVIDERS,
     orderedProviderIds,
     usableProviders,
+    visionProviderIds,
     maskKey,
     deeplUsageEndpoint,
     buildNativeInstructions,

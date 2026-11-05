@@ -453,7 +453,7 @@ async function run() {
     const err429 = new Error('Gemini: bị giới hạn tốc độ (HTTP 429)');
     const msg = Q.friendlyError(err429);
     assert.match(msg, /Rate Limit 429/, 'Phải cảnh báo rõ lỗi Rate Limit 429');
-    assert.match(msg, /thêm 1-2 API key Gemini phụ/, 'Phải gợi ý thêm key phụ');
+    assert.match(msg, /thêm 1-2 API key phụ/, 'Phải gợi ý thêm key phụ');
   }
 
   // 12. Kiểm tra render các ký hiệu toán nâng cao: \cong, \smile, \deg, cases environment, α2, ≠q

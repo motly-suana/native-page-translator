@@ -127,12 +127,14 @@
     deepl: '<path d="M7.2 6h3.4a5 5 0 0 1 0 10H7.2Z" fill="none" stroke="#fff" stroke-width="1.9" stroke-linejoin="round"/>',
     gemini: '<path d="M11 4.6c.55 3.3 1.75 4.5 5.05 5.05-3.3.55-4.5 1.75-5.05 5.05-.55-3.3-1.75-4.5-5.05-5.05C9.25 9.1 10.45 7.9 11 4.6Z" fill="#fff"/><path d="M16.6 13.4c.24 1.45.77 1.98 2.22 2.22-1.45.24-1.98.77-2.22 2.22-.24-1.45-.77-1.98-2.22-2.22 1.45-.24 1.98-.77 2.22-2.22Z" fill="#fff" opacity=".9"/>',
     openai: '<path d="M11 4.8 16.6 8v6.4L11 17.6 5.4 14.4V8Z" fill="none" stroke="#fff" stroke-width="1.7" stroke-linejoin="round"/><circle cx="11" cy="11.2" r="2" fill="#fff"/>',
+    deploy: '<path d="M11 4.6 5.6 7.8v6.4L11 17.4l5.4-3.2V7.8Z" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/><path d="M11 8.9v4.2M9 11h4" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>',
   };
 
   const BRAND_GRADIENTS = {
     deepl: ['#0b3b57', '#12b8a6'],
     gemini: ['#4285f4', '#9b72cb'],
     openai: ['#1f2937', '#4b5563'],
+    deploy: ['#0f172a', '#6366f1'],
   };
 
   // Dải màu cho slot tùy chỉnh — mỗi số thứ tự một cặp, quay vòng.
@@ -147,8 +149,8 @@
 
   let gradientSeed = 0;
 
-  /* variant: 'deepl' | 'gemini' | 'openai'; custom = số thứ tự slot tùy chỉnh
-   * (2, 3, ...) để đổi màu, bỏ trống là dùng màu gốc của variant. */
+  /* variant: 'deepl' | 'gemini' | 'openai' | 'deploy'; custom = số thứ tự slot
+   * tùy chỉnh (2, 3, ...) để đổi màu, bỏ trống là dùng màu gốc của variant. */
   function brand(variant, options = {}) {
     const kind = BRAND_GLYPHS[variant] ? variant : 'openai';
     const size = Number(options.size) || 22;

@@ -153,6 +153,24 @@ async function fetchStub(url, options = {}) {
         : 'hello from gemini',
     };
     body = JSON.stringify({ candidates: [{ content: { parts: [textPart] } }] });
+  } else if (u.includes('deploy.com')) {
+    // Deploy.com (OpenAI-compatible): batch -> mảng JSON cùng độ dài; vision khi
+    // messages[1].content có part image_url; còn lại trả text thường.
+    let isVision = false;
+    let wanted = 1;
+    try {
+      const parsed = JSON.parse(options.body || '{}');
+      const content = parsed.messages?.[1]?.content;
+      isVision = Array.isArray(content) && content.some(part => part.type === 'image_url');
+      if (!isVision) {
+        const lines = JSON.parse(content);
+        if (Array.isArray(lines)) wanted = lines.length;
+      }
+    } catch (_) { /* giữ mặc định */ }
+    const text = isVision
+      ? '```json\n[{"box":[10,20,30,40],"original":"Xin chào","translated":"Hello"}]\n```'
+      : JSON.stringify(Array.from({ length: wanted }, (_, i) => `deploy text ${i}`));
+    body = JSON.stringify({ choices: [{ message: { content: text }, finish_reason: 'stop' }] });
   }
 
   return {
@@ -340,7 +358,7 @@ async function main() {
   {
     // onInstalled (mục 2) phải tạo menu chuột phải
     assert.ok(createdMenus.some(menu => menu.id === 'npt-translate-image'), 'chưa tạo context menu dịch ảnh');
-    assert.equal(createdMenus.find(menu => menu.id === 'npt-translate-image').title, 'Dịch ảnh này (Gemini)');
+    assert.equal(createdMenus.find(menu => menu.id === 'npt-translate-image').title, 'Dịch ảnh này (AI vision)');
     assert.ok(contextMenuListeners.length > 0, 'chưa đăng ký contextMenus.onClicked');
 
     // Config seed chỉ có deepl -> bật gemini có key để dịch ảnh được
@@ -381,6 +399,74 @@ async function main() {
     assert.ok(visionBody.contents[0].parts.some(part => part.inline_data?.mime_type === 'image/png'));
     assert.ok(visionBody.contents[0].parts.some(part => part.inline_data?.data));
     assert.match(visionBody.systemInstruction.parts[0].text, /Vietnamese/);
+  }
+
+  // 8b. Deploy.com: whitelist origin + dịch batch + dịch ảnh đều đi qua deploy
+  {
+    const cfg = storageData.get('tm-multi-provider-config');
+    const backup = {
+      deepl: cfg.providers.deepl,
+      gemini: cfg.providers.gemini,
+      deploy: cfg.providers.deploy,
+    };
+    cfg.providers.deepl = { ...backup.deepl, enabled: false };
+    cfg.providers.gemini = { ...backup.gemini, enabled: false };
+    cfg.providers.deploy = { enabled: true, keys: [{ key: 'deploy-token-ABCDEF==', label: 'dp' }] };
+    await chromeStub.storage.local.set({ 'tm-multi-provider-config': cfg });
+    configCacheReset();
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    // (a) Origin deploy.com phải nằm trong whitelist cứng của background.
+    const notBlocked = await sendMessage({
+      type: 'proxyFetch',
+      payload: { method: 'GET', url: 'https://api-sf1-cdn.deploy.com/api/v1/models', timeout: 5000 },
+    });
+    assert.ok(
+      !/chưa được cấp quyền/.test(notBlocked.networkError || ''),
+      `origin deploy.com bị chặn oan: ${notBlocked.networkError}`,
+    );
+
+    // (b) providerTranslate -> batch qua deploy, đúng số phần tử
+    // Text mới (chưa có trong cache ở test 5) để chắc chắn đi tới provider.
+    const deployed = await sendMessage({
+      type: 'providerTranslate',
+      payload: { texts: ['đoạn một của deploy', 'đoạn hai của deploy'], targetLanguage: 'en' },
+    });
+    assert.equal(deployed.ok, true, JSON.stringify(deployed));
+    assert.deepEqual(Array.from(deployed.translations), ['deploy text 0', 'deploy text 1']);
+    assert.equal(deployed.provider, 'deploy');
+
+    const deployCall = fetchCalls.filter(c => c.url.includes('deploy.com')).pop();
+    const deployBody = JSON.parse(deployCall.options.body);
+    assert.equal(deployBody.reasoning_effort, 'none', 'dịch trang mặc định tắt suy luận cho nhanh');
+    assert.equal(deployBody.model, 'deepseek-ai/deepseek-v4.1-flash-1017');
+    assert.equal(deployBody.max_tokens, undefined, 'không đặt trần token cho reasoning model');
+
+    // (c) Dịch ảnh: chỉ có deploy (gemini tắt) vẫn phải chạy được
+    sentTabMessages.length = 0;
+    contextMenuListeners[0](
+      { menuItemId: 'npt-translate-image', srcUrl: 'https://example.com/anh.png' },
+      { id: 7 },
+    );
+    let imageMsg = null;
+    for (let i = 0; i < 50 && !imageMsg; i++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      imageMsg = sentTabMessages.find(entry => entry.message.type === 'imageTranslateResult');
+    }
+    assert.ok(imageMsg, 'thiếu imageTranslateResult (deploy)');
+    assert.equal(imageMsg.message.ok, true, JSON.stringify(imageMsg.message));
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(imageMsg.message.lines)),
+      [{ original: 'Xin chào', translated: 'Hello', box: [10, 20, 30, 40] }],
+    );
+
+    // Trả config về như cũ.
+    cfg.providers.deepl = backup.deepl;
+    cfg.providers.gemini = backup.gemini;
+    cfg.providers.deploy = backup.deploy;
+    await chromeStub.storage.local.set({ 'tm-multi-provider-config': cfg });
+    configCacheReset();
+    await new Promise(resolve => setTimeout(resolve, 20));
   }
 
   // 9. deeplUsage -> quota của key DeepL test (chỉ extension page mới gọi được, NPT-017)

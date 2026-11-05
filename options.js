@@ -16,6 +16,9 @@ const {
   providerIdsOf,
   nextCustomProviderId,
   MAX_CUSTOM_PROVIDERS,
+  DEPLOY_REASONING_EFFORTS,
+  DEPLOY_DEFAULT_REASONING,
+  DEPLOY_TRANSLATE_REASONING,
   maskKey,
 } = globalThis.NPT_PROVIDERS;
 
@@ -465,6 +468,53 @@ function renderProviderFields(card, providerId) {
     fields.appendChild(model);
   }
 
+  if (providerKind(providerId) === 'deploy') {
+    /* Hai mức riêng vì đo thật trên API: 'max' chỉ có lợi cho giải bài, còn
+     * dịch/OCR thì chậm 5-8x mà không khá hơn (bounding box ảnh còn lệch hơn). */
+    const templates = {
+      none: 'Không suy luận (nhanh nhất)',
+      minimal: 'Tối thiểu',
+      low: 'Thấp',
+      medium: 'Trung bình',
+      high: 'Cao',
+      xhigh: 'Rất cao',
+      max: 'Tối đa — sâu nhất',
+    };
+    const makeEffortSelect = (current, fallback, onChange) => {
+      const select = document.createElement('select');
+      for (const value of DEPLOY_REASONING_EFFORTS) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = templates[value] || value;
+        select.appendChild(option);
+      }
+      select.value = DEPLOY_REASONING_EFFORTS.includes(current) ? current : fallback;
+      select.addEventListener('change', () => { onChange(select.value); markDirty(); });
+      return select;
+    };
+    const hintOf = text => {
+      const hint = el('div', 'hint-text', text);
+      hint.style.fontSize = '11px';
+      hint.style.color = '#6b7280';
+      hint.style.marginLeft = '20px';
+      fields.appendChild(hint);
+    };
+
+    fields.appendChild(el('label', 'small-label', 'Mức suy luận khi dịch (dịch trang, dịch ảnh, OCR, tóm tắt)'));
+    fields.appendChild(makeEffortSelect(
+      provider.translateReasoningEffort, DEPLOY_TRANSLATE_REASONING,
+      value => { provider.translateReasoningEffort = value; },
+    ));
+    hintOf('⚡ Mặc định "Không suy luận": nhanh gấp 5-8 lần mà bản dịch tương đương. Bật cao hơn nếu trang toàn câu khó/nhiều ẩn ý.');
+
+    fields.appendChild(el('label', 'small-label', 'Mức suy luận khi giải bài (Quick Solver)'));
+    fields.appendChild(makeEffortSelect(
+      provider.reasoningEffort, DEPLOY_DEFAULT_REASONING,
+      value => { provider.reasoningEffort = value; },
+    ));
+    hintOf('🧠 Mặc định "Tối đa": giải toán/câu hỏi khó chính xác hơn, đổi lại chậm hơn (bài khó có thể 1-3 phút).');
+  }
+
   if (providerKind(providerId) === 'gemini') {
     const searchWrap = el('label', 'checkbox-label');
     const searchCheck = document.createElement('input');
@@ -610,6 +660,7 @@ const BUILTIN_ORIGINS = new Set([
   'https://translate.google.com',
   'https://api.mymemory.translated.net',
   'https://generativelanguage.googleapis.com',
+  'https://api-sf1-cdn.deploy.com',
   'https://api-free.deepl.com',
   'https://api.deepl.com',
 ]);

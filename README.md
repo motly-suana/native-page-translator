@@ -86,7 +86,7 @@ Toàn bộ icon của extension nằm trong **`icons.js`** — một nguồn duy
 
 - **53 icon** vẽ tay trên cùng lưới 24×24, nét 1.7, bo tròn đầu nét, tô bằng `currentColor` nên tự đổi màu theo theme sáng/tối và theo trạng thái của nút.
 - Dùng chung cho **mọi bề mặt**: popup, trang Cài đặt, trang Dịch PDF, và cả panel nổi trên trang web (nút dịch trang, nút dịch đoạn bôi đen, nút ✨ EN cạnh ô nhập) — trước đây mỗi file tự chép một đoạn `<svg>` riêng, mỗi nơi một độ dày nét.
-- **Nhãn provider** là ô gradient + glyph: DeepL, Gemini, OpenAI-compatible; mỗi slot API tùy chỉnh tự đổi màu theo số thứ tự nên Groq / OpenRouter / API nhà nhìn là phân biệt được.
+- **Nhãn provider** là ô gradient + glyph: DeepL, Gemini, Deploy, OpenAI-compatible; mỗi slot API tùy chỉnh tự đổi màu theo số thứ tự nên Groq / OpenRouter / API nhà nhìn là phân biệt được.
 - **Logo app dùng đúng một dấu hiệu** cho icon trên thanh công cụ (`icons/icon.svg` + 4 file PNG) và header của popup/Cài đặt/PDF.
 - Markup tĩnh chỉ cần `<i class="ico" data-icon="key"></i>`; `NPT_ICONS.hydrate()` điền phần còn lại. Test `tests/icons.test.js` bắt lỗi gõ sai tên icon — thứ mà trên giao diện chỉ hiện ra dưới dạng "chỗ đó trống trơn".
 
@@ -101,12 +101,19 @@ Mở popup → **Quản lý key** (hoặc menu chuột phải icon → **Options
   - **Key chuẩn phải bắt đầu bằng `AIza`.** Nếu AI Studio trả về key dạng `AQ.`, tài khoản Google của bạn đang bị giới hạn — Gemini API sẽ từ chối key đó. Cách xử lý: tạo key trong project mới, dùng tài khoản Google khác, hoặc tạo API key tại [Google Cloud Console](https://console.cloud.google.com/apis/credentials) (bật Generative Language API).
   - Tích hợp tuỳ chọn Google Search Grounding và Extended Thinking (`thinkingLevel: "high"`) khi giải câu hỏi khó.
 - **OpenAI-compatible** — endpoint tùy ý (OpenAI, LibreTranslate, API tự host...), có thể không cần key.
+- **Deploy.com API** — endpoint `https://api-sf1-cdn.deploy.com/api/v1/chat/completions`, dán **token** của deploy.com vào là chạy (token base64 thường kết thúc bằng `==`, tự nhận về đúng thẻ khi dán lẫn với key khác). Model mặc định `deepseek-ai/deepseek-v4.1-flash-1017`, đổi được sang `zai-org/glm-5.3-flash`.
+  - **Hai mức suy luận riêng** (đổi được trong Cài đặt → thẻ Deploy):
+    - **Giải bài (Quick Solver) — mặc định `max`**: suy luận sâu nhất. Đo thật: `max` sinh nhiều reasoning token nhất, `none` = 0.
+    - **Dịch trang / dịch ảnh / OCR / tóm tắt — mặc định `none`**: đo thật cho thấy `max` ở các việc này chậm 5–8× (12,5s vs 1,6s cho 6 câu) mà bản dịch không khá hơn, còn bounding box ảnh lệch **nhiều hơn** (sai số TB 63–84 vs 36–41 trên thang 0–1000).
+  - **Đọc được ảnh**: dùng cho dịch ảnh (chuột phải ảnh), quét OCR (`Alt+Shift+S`) và Quick Solver ảnh — không cần key Gemini nữa.
+  - Request Deploy có timeout riêng: dịch 120s, giải bài 200s (trần cứng background 240s) — trần 70s cũ sẽ cắt ngang bài khó (đo được có ca ~280s).
+  - Không đặt `max_tokens`: token suy luận tính chung trần đó, nên trần thấp làm model nghĩ hết quota rồi trả **content rỗng**. Nếu bị cắt, thông báo lỗi nói thẳng nguyên nhân (`model nghĩ hết trần token…`).
 
 ### Nhiều nhà cung cấp chạy song song
 
-Ba provider trên bật **đồng thời** được, mỗi cái giữ danh sách key riêng. Ngoài ra bấm **"Thêm API tùy chỉnh"** để tạo thêm bao nhiêu endpoint OpenAI-compatible cũng được (tối đa 20): Groq, OpenRouter, Together, API tự host… — **mỗi slot có URL / model / định dạng / key riêng** và tự đặt tên để nhận ra trong ô "Provider ưu tiên" lẫn trong thông báo lỗi.
+Bốn provider trên bật **đồng thời** được, mỗi cái giữ danh sách key riêng. Ngoài ra bấm **"Thêm API tùy chỉnh"** để tạo thêm bao nhiêu endpoint OpenAI-compatible cũng được (tối đa 20): Groq, OpenRouter, Together, API tự host… — **mỗi slot có URL / model / định dạng / key riêng** và tự đặt tên để nhận ra trong ô "Provider ưu tiên" lẫn trong thông báo lỗi.
 
-Tất cả nằm chung một vòng xoay: hết key của provider này thì tự sang provider kế, đúng thứ tự bạn chọn. Ví dụ một cấu hình chạy được ngay: DeepL 5 key → Gemini 30 key → Groq 3 key → OpenRouter 2 key.
+Tất cả nằm chung một vòng xoay: hết key của provider này thì tự sang provider kế, đúng thứ tự bạn chọn. Ví dụ một cấu hình chạy được ngay: DeepL 5 key → Gemini 30 key → Deploy 2 token → Groq 3 key → OpenRouter 2 key.
 
 - Quyền truy cập từng endpoint tùy chỉnh được xin **gộp một lần** khi bấm Lưu cài đặt.
 - Extension chỉ cho phép gọi ra đúng origin của những endpoint đang cấu hình — origin lạ vẫn bị `isRemoteAllowed` chặn.
@@ -125,9 +132,9 @@ Tất cả nằm chung một vòng xoay: hết key của provider này thì tự
 | Dòng .env | `GEMINI_API_KEY=AIza...1` |
 | Kèm nhãn | `AIza...1 (acc phụ)` · `acc 2: AIza...2` · `AIza...3 # acc 3` |
 | Key bị nối liền do dán vào ô một dòng của bản cũ | `AIza...1AIza...2` |
-| **Trộn lẫn key của nhiều nhà cung cấp** | `AIza...1`⏎`uuid:fx`⏎`sk-...` |
+| **Trộn lẫn key của nhiều nhà cung cấp** | `AIza...1`⏎`uuid:fx`⏎`sk-...`⏎`AbCdEfGhIjKlMnOpQrStUv==` |
 
-- **Dán mớ key trộn lẫn ở thẻ nào cũng được**: key nhận ra được định dạng tự về đúng thẻ — `AIza…`/`AQ.` → Gemini, `uuid` hoặc `uuid:fx` → DeepL, `sk-…`/`gsk_…`/`xai-…`/`hf_…` → OpenAI-compatible. Key lạ (API tự host) ở lại đúng thẻ bạn đang dán, và key kiểu OpenAI dán ở slot tùy chỉnh nào thì ở yên slot đó.
+- **Dán mớ key trộn lẫn ở thẻ nào cũng được**: key nhận ra được định dạng tự về đúng thẻ — `AIza…`/`AQ.` → Gemini, `uuid` hoặc `uuid:fx` → DeepL, `sk-…`/`gsk_…`/`xai-…`/`hf_…` → OpenAI-compatible, chuỗi base64 kết thúc `==` (dài ≥18, chia hết 4) → Deploy.com. Key lạ (API tự host) ở lại đúng thẻ bạn đang dán, và key kiểu OpenAI dán ở slot tùy chỉnh nào thì ở yên slot đó.
 - Provider vừa nhận key đầu tiên được **bật tự động** — key nằm trong provider đang tắt thì vô dụng.
 - Số key nhận diện được hiện ngay trên nút (**"Thêm 12 key"**) trước khi bấm, kèm dòng chia key (`7 → Gemini · 3 → DeepL`).
 - **Key trùng tự bỏ** (trùng nhau trong nội dung dán, hoặc trùng key đã lưu) — báo lại bao nhiêu cái bị bỏ.
@@ -159,7 +166,7 @@ Mỗi provider thêm được **nhiều key**. Khi dịch:
 - **Chống lạm dụng quota**: dịch động có budget ký tự/phút/tab; timeout phía content sẽ hủy luôn request đang chạy ở background; key rotation reserve nguyên tử tránh dồn request vào một key; cache dịch có giới hạn entry; tab ẩn không polling.
 - **Custom endpoint chỉ chấp nhận HTTPS** (trừ localhost) — không gửi Bearer key/nội dung qua HTTP plaintext.
 - **Khi dùng fallback miễn phí** (không có API key riêng): nội dung trang được gửi tới endpoint không chính thức của Google (`translate.googleapis.com` / `translate.google.com`) và MyMemory — đây là bản chất của mọi dịch vụ dịch miễn phí. Muốn kiểm soát dữ liệu hoàn toàn, hãy thêm API key riêng (DeepL/Gemini/OpenAI) trong Cài đặt.
-- **Dịch ảnh**: ảnh được tải về background và gửi tới Gemini API (kèm base64) để OCR — không qua bên thứ tư nào khác.
+- **Dịch ảnh**: ảnh được tải về background rồi gửi tới API đọc được ảnh mà bạn đã cấu hình (Gemini, hoặc Deploy.com nếu bạn dùng token đó) kèm base64 — không qua bên thứ tư nào khác.
 - **Không nhúng API key trong mã nguồn (Chuẩn Chrome Web Store)**: Tiện ích không chứa bất kỳ API key nào dựng sẵn để đảm bảo an toàn tuyệt đối và tuân thủ chính sách Developer Program Policies của Google. Người dùng hoàn toàn làm chủ hạn ngạch và tính riêng tư bằng cách sử dụng key cá nhân của mình hoặc sử dụng các bộ dịch tự động miễn phí có sẵn.
 
 ## Quota DeepL
@@ -211,18 +218,18 @@ Với Gemini/OpenAI, chọn giọng văn trong popup hoặc Cài đặt:
 
 DeepL là engine dịch thuần nên không áp dụng phong cách qua prompt, nhưng khi chọn **Thân mật** thì kết quả DeepL vẫn được bộ lọc hậu xử lý bỏ apostrophe. Muốn văn "ngườ" nhất thì ưu tiên Gemini/OpenAI.
 
-## Dịch ảnh (OCR qua Gemini)
+## Dịch ảnh (OCR qua AI vision)
 
 Dịch chữ trong ảnh (meme, banner, ảnh chụp màn hình...) mà không cần gõ lại:
 
-- **Cách dùng**: chuột phải vào ảnh bất kỳ → chọn **"Dịch ảnh này (Gemini)"**. Kết quả hiện theo 2 tầng: **chữ dịch vẽ đè trực tiếp lên ảnh gốc** (đúng vị trí, cỡ chữ co theo chữ gốc, nền lấy màu xung quanh — ảnh gốc không bị sửa, nút **"Ẩn chữ đè"** để xem gốc) và **danh sách text gốc → dịch** trong panel cạnh ảnh kèm nút sao chép. Panel **kéo di chuyển được** (giữ thanh tiêu đề). Đích dịch mặc định là tiếng Việt.
-- **Yêu cầu**: bật provider **Gemini** và có key hợp lệ (lấy tại <https://aistudio.google.com/apikey>). Gemini là model multimodal nên đọc ảnh trực tiếp — không cần OCR engine riêng.
+- **Cách dùng**: chuột phải vào ảnh bất kỳ → chọn **"Dịch ảnh này (AI vision)"**. Kết quả hiện theo 2 tầng: **chữ dịch vẽ đè trực tiếp lên ảnh gốc** (đúng vị trí, cỡ chữ co theo chữ gốc, nền lấy màu xung quanh — ảnh gốc không bị sửa, nút **"Ẩn chữ đè"** để xem gốc) và **danh sách text gốc → dịch** trong panel cạnh ảnh kèm nút sao chép. Panel **kéo di chuyển được** (giữ thanh tiêu đề). Đích dịch mặc định là tiếng Việt.
+- **Yêu cầu**: bật ít nhất một provider đọc được ảnh — **Gemini** (key tại <https://aistudio.google.com/apikey>) hoặc **Deploy.com** (dán token). Cả hai đều là model multimodal nên đọc ảnh trực tiếp — không cần OCR engine riêng. Không có cái nào thì báo `IMAGE_NEEDS_VISION` bằng tiếng Việt rõ ràng.
 - **Quyền truy cập**: extension fetch ảnh từ background bằng quyền host; lần đầu dịch ảnh trên một domain, trình duyệt sẽ hỏi quyền truy cập domain đó — chọn **Cho phép** để tiếp tục.
 
 Giới hạn hiện tại:
 
 - Lớp chữ đè là vẽ lại bằng canvas (mờ vùng chữ gốc + phủ màu nền lấy xung quanh + render chữ mới), không phải inpainting AI — nền phức tạp (gradient mạnh, hoạ tiết) có thể nhìn hơi "dán".
-- Dòng nào Gemini không trả về bounding box sẽ chỉ hiện trong danh sách text, không vẽ đè.
+- Dòng nào model không trả về bounding box sẽ chỉ hiện trong danh sách text, không vẽ đè.
 - Ảnh quá lớn hoặc chữ quá nhỏ/nét kém có thể đọc sai; chữ dọc/xoay chưa hỗ trợ vẽ đè.
 
 ## Icon nổi trên trang (FAB)

@@ -573,7 +573,7 @@ async function run() {
     assert.ok(JSON.parse(calls[0].body).contents[0].parts.some(part => part.inline_data));
   }
 
-  // 30. Config có deepl mà không có key gemini -> IMAGE_NEEDS_GEMINI
+  // 30. Config có deepl mà không có provider đọc ảnh nào -> IMAGE_NEEDS_VISION
   {
     const cfg = P.normalizeConfig({ providers: { deepl: { enabled: true, keys: [{ key: 'd:fx' }] } } });
     await assert.rejects(
@@ -581,7 +581,7 @@ async function run() {
         config: cfg, mimeType: 'image/png', imageBase64: 'QUJD', targetLanguage: 'vi',
         fetchText: async () => ({ status: 200, bodyText: '{}' }), keyState: P.createKeyState(), sleep: noSleep,
       }),
-      /IMAGE_NEEDS_GEMINI/,
+      /IMAGE_NEEDS_VISION/,
     );
   }
 
@@ -1316,7 +1316,7 @@ async function run() {
         'openai-3': { enabled: true, name: 'OpenRouter', url: 'https://openrouter.ai/api/v1/chat/completions', keys: ['sk-or-v1-bbbbbbbb'] },
       },
     });
-    assert.deepEqual(P.providerIdsOf(cfg), ['deepl', 'gemini', 'openai', 'openai-2', 'openai-3']);
+    assert.deepEqual(P.providerIdsOf(cfg), ['deepl', 'gemini', 'openai', 'deploy', 'openai-2', 'openai-3']);
     assert.equal(cfg.providers['openai-2'].name, 'Groq');
     assert.equal(cfg.providers['openai-2'].model, P.PROVIDER_DEFS.openai.defaultModel, 'slot tùy chỉnh phải có model mặc định');
     assert.equal(P.providerLabelOf('openai-2', cfg.providers['openai-2']), 'Groq');
@@ -1499,6 +1499,161 @@ async function run() {
     const bodyNormal = JSON.parse(reqNormal.body);
     assert.equal(bodyNormal.generationConfig.thinkingConfig, undefined);
     assert.equal(bodyNormal.generationConfig.temperature, 0.1);
+  }
+
+  // 75. Deploy.com: endpoint, hai mức suy luận riêng, Bearer, model mặc định
+  {
+    assert.equal(P.providerKind('deploy'), 'deploy');
+    assert.equal(P.providerLabelOf('deploy', {}), 'Deploy.com API');
+    // Giải bài: sâu nhất. Dịch/OCR: tắt suy luận cho nhanh.
+    assert.equal(P.emptyProviderConfig('deploy').reasoningEffort, 'max');
+    assert.equal(P.emptyProviderConfig('deploy').translateReasoningEffort, 'none');
+    assert.equal(P.emptyProviderConfig('deploy').model, 'deepseek-ai/deepseek-v4.1-flash-1017');
+
+    const req = P.buildRequest({
+      providerId: 'deploy', providerConfig: {}, apiKey: 'tok==',
+      source: 'xin chào', context: '',
+    });
+    assert.equal(req.url, 'https://api-sf1-cdn.deploy.com/api/v1/chat/completions');
+    assert.equal(req.headers.Authorization, 'Bearer tok==');
+    assert.equal(req.openaiFormat, 'chat');
+    const body = JSON.parse(req.body);
+    assert.equal(body.model, 'deepseek-ai/deepseek-v4.1-flash-1017');
+    // Dịch không được dùng 'max': chậm 5-8x mà bản dịch không khá hơn.
+    assert.equal(body.reasoning_effort, 'none', 'dịch mặc định phải tắt suy luận');
+    // Không gửi max_tokens cho request dịch thường: để model tự dừng.
+    assert.equal(body.max_tokens, undefined);
+
+    // Giải bài vẫn mặc định 'max'.
+    const solve = P.buildQaRequest({
+      providerId: 'deploy', providerConfig: {}, apiKey: 'tok==', text: 'giải phương trình x^2=4',
+    });
+    assert.equal(JSON.parse(solve.body).reasoning_effort, 'max');
+
+    // Cấu hình riêng cho từng việc -> request đi theo cấu hình.
+    const low = P.buildRequest({
+      providerId: 'deploy',
+      providerConfig: { translateReasoningEffort: 'low', model: 'zai-org/glm-5.3-flash' },
+      apiKey: 't', source: 'x', context: '',
+    });
+    const lowBody = JSON.parse(low.body);
+    assert.equal(lowBody.reasoning_effort, 'low');
+    assert.equal(lowBody.model, 'zai-org/glm-5.3-flash');
+
+    // Giá trị rác trong config không được đẩy lên API -> rơi về mặc định.
+    const junk = P.buildRequest({
+      providerId: 'deploy', providerConfig: { translateReasoningEffort: 'siêu-cấp' }, apiKey: 't', source: 'x', context: '',
+    });
+    assert.equal(JSON.parse(junk.body).reasoning_effort, 'none');
+    const junkSolve = P.normalizeConfig({
+      providers: { deploy: { enabled: true, keys: ['t=='], reasoningEffort: 'siêu-cấp' } },
+    });
+    assert.equal(junkSolve.providers.deploy.reasoningEffort, 'max');
+  }
+
+  // 76. Deploy batch/summary: vẫn giữ reasoning và trả JSON array như chat thường
+  {
+    const batchReq = P.buildBatchRequest({
+      providerId: 'deploy', providerConfig: {}, apiKey: 't',
+      texts: ['một', 'hai'], sourceLanguage: 'vi', targetLanguage: 'en',
+    });
+    const batchBody = JSON.parse(batchReq.body);
+    assert.equal(batchBody.reasoning_effort, 'none', 'dịch batch cũng không dùng suy luận sâu');
+    assert.equal(batchBody.messages[0].role, 'system');
+    assert.deepEqual(JSON.parse(batchBody.messages[1].content), ['một', 'hai']);
+
+    const { fetchText, calls } = fakeFetch([
+      () => ({ status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: '["one","two"]' } }] }) }),
+    ]);
+    const cfg = P.normalizeConfig({
+      preferred: 'deploy',
+      providers: { deploy: { enabled: true, keys: [{ key: 'tok==' }] } },
+    });
+    const out = await P.translateBatchWithRotation({
+      config: cfg, texts: ['một', 'hai'], sourceLanguage: 'vi', targetLanguage: 'en',
+      fetchText, keyState: P.createKeyState(), sleep: noSleep,
+    });
+    assert.deepEqual(out.translations, ['one', 'two']);
+    assert.equal(out.provider, 'deploy');
+    assert.equal(new URL(calls[0].url).host, 'api-sf1-cdn.deploy.com');
+  }
+
+  // 77. Deploy đọc được ảnh: vision + OCR đi qua image_url data URL, không cần Gemini
+  {
+    const cfg = P.normalizeConfig({
+      preferred: 'deploy',
+      providers: { deploy: { enabled: true, keys: [{ key: 'tok==' }] } },
+    });
+    assert.deepEqual(P.visionProviderIds(cfg), ['deploy']);
+
+    const visionBody = JSON.stringify({
+      choices: [{ message: { content: '```json\n[{"box":[10,20,30,40],"original":"Xin chào","translated":"Hello"}]\n```' } }],
+    });
+    const { fetchText, calls } = fakeFetch([() => ({ status: 200, bodyText: visionBody })]);
+    const result = await P.translateVisionWithRotation({
+      config: cfg, mimeType: 'image/png', imageBase64: 'QUJD', targetLanguage: 'en',
+      fetchText, keyState: P.createKeyState(), sleep: noSleep,
+    });
+    assert.equal(result.provider, 'deploy');
+    assert.deepEqual(result.lines, [{ original: 'Xin chào', translated: 'Hello', box: [10, 20, 30, 40] }]);
+
+    const sent = JSON.parse(calls[0].body);
+    const imagePart = sent.messages[1].content.find(part => part.type === 'image_url');
+    assert.equal(imagePart.image_url.url, 'data:image/png;base64,QUJD');
+    assert.equal(sent.reasoning_effort, 'none', 'dịch ảnh không dùng suy luận sâu');
+
+    // OCR thuần cũng đi qua Deploy khi không có Gemini.
+    const { fetchText: ocrFetch } = fakeFetch([
+      () => ({ status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: 'Dòng 1\nDòng 2' } }] }) }),
+    ]);
+    const ocr = await P.ocrVisionWithRotation({
+      config: cfg, mimeType: 'image/png', imageBase64: 'QUJD',
+      fetchText: ocrFetch, keyState: P.createKeyState(), sleep: noSleep,
+    });
+    assert.equal(ocr.text, 'Dòng 1\nDòng 2');
+    assert.deepEqual(ocr.lines, [{ text: 'Dòng 1' }, { text: 'Dòng 2' }]);
+  }
+
+  // 78. Quick Solver: ảnh chấp nhận Deploy, model nhận image_url + reasoning sâu
+  {
+    const req = P.buildQaRequest({
+      providerId: 'deploy',
+      providerConfig: {},
+      apiKey: 'tok==',
+      text: 'Giải bài này',
+      imageBase64: 'QUJD',
+      mimeType: 'image/jpeg',
+    });
+    const body = JSON.parse(req.body);
+    assert.equal(body.reasoning_effort, 'max');
+    // KHÔNG gửi max_tokens: reasoning ăn chung trần token, trần thấp -> content rỗng.
+    assert.equal(body.max_tokens, undefined, 'không được đặt trần token cho reasoning model');
+    assert.equal(req.timeout, 200000, 'giải bài phải có timeout rộng hơn 60s mặc định');
+    // Timeout không được vượt trần background (MAX_REQUEST_TIMEOUT_MS = 240000),
+    // còn content nhường 190s nên dịch trang dùng 120s.
+    assert.ok(req.timeout < 240000, 'timeout phải nằm dưới trần cứng của background');
+    const parts = body.messages[1].content;
+    assert.equal(parts[0].type, 'text');
+    assert.equal(parts[1].image_url.url, 'data:image/jpeg;base64,QUJD');
+
+    // Provider không đọc ảnh (openai) vẫn bị chặn đúng lỗi.
+    assert.throws(
+      () => P.buildQaRequest({
+        providerId: 'openai', providerConfig: { format: 'chat' }, apiKey: 'sk-x',
+        text: 'x', imageBase64: 'QUJD',
+      }),
+      /IMAGE_NEEDS_VISION/,
+    );
+  }
+
+  // 79. detectProviderForKey nhận token deploy base64, không nuốt key khác
+  {
+    assert.equal(P.detectProviderForKey('AbCdEfGhIjKlMnOpQrStUv=='), 'deploy');
+    assert.equal(P.detectProviderForKey('AIzaSyABCdefghijklmnop'), 'gemini');
+    assert.equal(P.detectProviderForKey('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:fx'), 'deepl');
+    assert.equal(P.detectProviderForKey('key-cua-api-tu-host'), '');
+    // Chuỗi base64 dài nhưng thiếu "==" không phải token deploy.
+    assert.equal(P.detectProviderForKey('abcdefghijklmnopqrstuvwxyz'), '');
   }
 
   console.log('Tất cả test providers.js đều PASS ✔');

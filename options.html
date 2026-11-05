@@ -12,7 +12,7 @@
       <span id="brandLogo" class="brand-logo-slot"></span>
       <div class="brand-text">
         <h1>Native Translator</h1>
-        <span class="brand-sub">Nhiều API key · DeepL · Gemini · OpenAI-compatible</span>
+        <span class="brand-sub">Nhiều API key · DeepL · Gemini · Deploy · OpenAI-compatible</span>
       </div>
       <span id="versionPill" class="version-pill">v—</span>
     </header>
@@ -38,7 +38,7 @@
     <div id="tab-page" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-page">
       <section>
         <h2><i class="ico" data-icon="page" data-icon-size="15"></i>Hành vi dịch trang</h2>
-        <label class="check"><input id="pageUseProvider" type="checkbox"> Dịch cả trang bằng API riêng (tốn quota DeepL/Gemini)</label>
+        <label class="check"><input id="pageUseProvider" type="checkbox"> Dịch cả trang bằng API riêng (tốn quota DeepL/Gemini/Deploy)</label>
         <label class="check"><input id="pageFreeFallback" type="checkbox"> Fallback miễn phí khi provider riêng lỗi (Google/MyMemory — nội dung gửi bên thứ ba)</label>
         <label class="check"><input id="selectionTranslate" type="checkbox"> Dịch đoạn bôi đen (hiện nút nổi khi chọn chữ)</label>
         <label class="small-label" for="siteBlacklist">Không dịch trên các site (mỗi dòng 1 domain)</label>
@@ -73,7 +73,7 @@
           <option value="literal">Dịch sát chữ</option>
         </select>
         <label class="check"><input id="pageGrammarFix" type="checkbox"> Sửa ngữ pháp sau khi dịch</label>
-        <p class="note">Văn phong chỉ áp dụng với Gemini/OpenAI — DeepL/Google free bỏ qua.</p>
+        <p class="note">Văn phong chỉ áp dụng với Gemini/Deploy/OpenAI — DeepL/Google free bỏ qua.</p>
       </section>
 
       <section>
@@ -105,10 +105,10 @@
         <label class="check"><input id="inputHelper" type="checkbox"> Hiện nút ✨ EN cạnh ô nhập liệu</label>
         <label for="defaultMode" class="small-label">Nút EN mặc định dùng</label>
         <select id="defaultMode">
-          <option value="native">API riêng — tự nhiên (DeepL/Gemini/OpenAI)</option>
+          <option value="native">API riêng — tự nhiên (DeepL/Gemini/Deploy/OpenAI)</option>
           <option value="quick">Free fallback — nhanh</option>
         </select>
-        <label for="tone" class="small-label">Phong cách dịch bản địa (Gemini / OpenAI)</label>
+        <label for="tone" class="small-label">Phong cách dịch bản địa (Gemini / Deploy / OpenAI)</label>
         <select id="tone">
           <option value="natural">Tự nhiên — bám đúng văn phong gốc</option>
           <option value="professional">Trang trọng — email, công việc</option>
@@ -130,9 +130,9 @@
         <div id="deeplUsage"></div>
         <select id="preferred" aria-label="Provider ưu tiên"></select>
         <p class="note">Khi dịch, extension thử provider ưu tiên trước; key lỗi/hết quota sẽ tự xoay sang key khác, rồi sang provider khác.</p>
-        <p class="note">Mẹo: chuột phải vào ảnh bất kỳ → "Dịch ảnh này (Gemini)" để OCR + dịch chữ trong ảnh (cần key Gemini).</p>
+        <p class="note">Mẹo: chuột phải vào ảnh bất kỳ → "Dịch ảnh này (AI vision)" để OCR + dịch chữ trong ảnh (cần key Gemini hoặc Deploy.com — cả hai đều đọc được ảnh).</p>
         <p class="note">Thêm key: dán <b>bao nhiêu key cũng được</b> vào một lượt — mỗi dòng 1 key, hoặc ngăn bằng dấu phẩy / khoảng trắng / gạch dọc. Nhận cả dạng dán từ code (<code>["key1", "key2"]</code>), danh sách có số thứ tự, dòng <code>API_KEY=...</code>, và chú thích cuối dòng (<code>key (acc 2)</code>) sẽ thành nhãn. Key trùng tự bỏ. Enter để thêm nhanh 1 key, Ctrl/⌘+Enter khi đã dán nhiều dòng.</p>
-        <p class="note">Dán key của nhiều nhà cung cấp cùng lúc cũng được: key nhận ra được định dạng (<code>AIza…</code> → Gemini, <code>uuid:fx</code> → DeepL, <code>sk-…</code>/<code>gsk_…</code> → OpenAI-compatible) sẽ <b>tự về đúng thẻ</b>, dán ở thẻ nào cũng vậy.</p>
+        <p class="note">Dán key của nhiều nhà cung cấp cùng lúc cũng được: key nhận ra được định dạng (<code>AIza…</code> → Gemini, <code>uuid:fx</code> → DeepL, <code>sk-…</code>/<code>gsk_…</code> → OpenAI-compatible, token base64 kết thúc <code>==</code> → Deploy.com) sẽ <b>tự về đúng thẻ</b>, dán ở thẻ nào cũng vậy.</p>
         <div id="providers"></div>
         <div class="row action-row">
           <button id="addCustomProvider" type="button"><i class="ico" data-icon="plus"></i>Thêm API tùy chỉnh</button>
