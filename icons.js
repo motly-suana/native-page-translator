@@ -89,6 +89,13 @@
     bookmark: '<path d="M6.4 3.8h11.2a1.2 1.2 0 0 1 1.2 1.2v15.2L12 16.4l-6.8 3.8V5a1.2 1.2 0 0 1 1.2-1.2Z"/>',
     chevron: '<path d="m6.4 9.2 5.6 5.6 5.6-5.6"/>',
     grip: '<circle cx="9" cy="6.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="17.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="17.5" r="1.3" fill="currentColor" stroke="none"/>',
+    activity: '<path d="M2.8 12h4.2l2.6-6.2 4.8 12.4 2.6-6.2h4.2"/>',
+    cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="0.8"/><path d="M9 2.8v3.2M15 2.8v3.2M9 18v3.2M15 18v3.2M2.8 9H6M2.8 15H6M18 9h3.2M18 15h3.2"/>',
+    terminal: '<rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.4"/><path d="m7.6 9.4 3.4 2.6-3.4 2.6M12.6 15.2h3.8"/>',
+    filter: '<path d="M3.6 5.2h16.8l-6.4 7.4v5.6l-4 1.8v-7.4Z"/>',
+    grid: '<rect x="3.6" y="3.6" width="7.2" height="7.2" rx="1.6"/><rect x="13.2" y="3.6" width="7.2" height="7.2" rx="1.6"/><rect x="3.6" y="13.2" width="7.2" height="7.2" rx="1.6"/><rect x="13.2" y="13.2" width="7.2" height="7.2" rx="1.6"/>',
+    'shield-check': '<path d="M12 3 4.8 5.8v5.6c0 4.3 2.9 8.1 7.2 9.6 4.3-1.5 7.2-5.3 7.2-9.6V5.8Z"/><path d="m8.8 12.2 2.2 2.2 4.4-4.6"/>',
+    flame: '<path d="M12.2 3c.3 3-1.8 4.4-2 6.8-.1 1.4.8 2.6 2 2.9-.2-1.2.4-2.5 1.7-3.1 2.2 1.8 3.6 4.1 3.6 6.4A5.5 5.5 0 1 1 6.5 16c0-3.1 2.2-6 5.7-13Z"/>',
   };
 
   const DEFAULT_SIZE = 16;
@@ -128,6 +135,18 @@
     gemini: '<path d="M11 4.6c.55 3.3 1.75 4.5 5.05 5.05-3.3.55-4.5 1.75-5.05 5.05-.55-3.3-1.75-4.5-5.05-5.05C9.25 9.1 10.45 7.9 11 4.6Z" fill="#fff"/><path d="M16.6 13.4c.24 1.45.77 1.98 2.22 2.22-1.45.24-1.98.77-2.22 2.22-.24-1.45-.77-1.98-2.22-2.22 1.45-.24 1.98-.77 2.22-2.22Z" fill="#fff" opacity=".9"/>',
     openai: '<path d="M11 4.8 16.6 8v6.4L11 17.6 5.4 14.4V8Z" fill="none" stroke="#fff" stroke-width="1.7" stroke-linejoin="round"/><circle cx="11" cy="11.2" r="2" fill="#fff"/>',
     deploy: '<path d="M11 4.6 5.6 7.8v6.4L11 17.4l5.4-3.2V7.8Z" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/><path d="M11 8.9v4.2M9 11h4" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>',
+    anthropic: '<path d="m7.2 16 3.8-10 3.8 10M8.6 13.2h4.8" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+    groq: '<path d="M12.4 4.8 6.4 12h4.4l-1.2 5.2 6-7.2h-4.4Z" fill="#fff"/>',
+    openrouter: '<circle cx="6.5" cy="11" r="2" fill="#fff"/><circle cx="15.5" cy="7" r="2" fill="#fff"/><circle cx="15.5" cy="15" r="2" fill="#fff"/><path d="m8.3 10.2 5.4-2.4M8.3 11.8l5.4 2.4" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>',
+    cerebras: '<circle cx="11" cy="11" r="4.6" fill="none" stroke="#fff" stroke-width="1.6"/><path d="M11 4.4v2M11 15.6v2M4.4 11h2M15.6 11h2" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>',
+    deepseek: '<circle cx="11" cy="11" r="5" fill="none" stroke="#fff" stroke-width="1.6"/><path d="M7.6 11c1.8-1.4 4.6-1.4 6.8 0" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>',
+    xai: '<path d="m6.5 6.5 9 9M15.5 6.5l-9 9" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/>',
+    mistral: '<path d="M6.4 6.5h2.2v9H6.4ZM9.9 6.5h2.2v5.4H9.9ZM13.4 6.5h2.2v9h-2.2Z" fill="#fff"/>',
+    together: '<circle cx="8.8" cy="11" r="3.1" fill="none" stroke="#fff" stroke-width="1.6"/><circle cx="13.2" cy="11" r="3.1" fill="none" stroke="#fff" stroke-width="1.6"/>',
+    fireworks: '<path d="M11 4.8v12.4M4.8 11h12.4M6.8 6.8l8.4 8.4M15.2 6.8l-8.4 8.4" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>',
+    perplexity: '<path d="M11 4.8v12.4M6.5 8l4.5 3-4.5 3M15.5 8 11 11l4.5 3" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
+    siliconflow: '<path d="M5.6 9.2c2-1.8 3.6 1.8 5.4 0 1.8-1.8 3.4 1.8 5.4 0M5.6 13.4c2-1.8 3.6 1.8 5.4 0 1.8-1.8 3.4 1.8 5.4 0" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>',
+    cohere: '<circle cx="8.5" cy="9" r="2.2" fill="#fff"/><circle cx="14" cy="11.5" r="2.6" fill="#fff" opacity=".88"/><circle cx="8.5" cy="14.5" r="1.8" fill="#fff" opacity=".78"/>',
   };
 
   const BRAND_GRADIENTS = {
@@ -135,6 +154,18 @@
     gemini: ['#4285f4', '#9b72cb'],
     openai: ['#1f2937', '#4b5563'],
     deploy: ['#0f172a', '#6366f1'],
+    anthropic: ['#d97706', '#b45309'],
+    groq: ['#f97316', '#dc2626'],
+    openrouter: ['#4f46e5', '#7c3aed'],
+    cerebras: ['#ea580c', '#c2410c'],
+    deepseek: ['#2563eb', '#0284c7'],
+    xai: ['#111827', '#374151'],
+    mistral: ['#f59e0b', '#ef4444'],
+    together: ['#0ea5e9', '#3b82f6'],
+    fireworks: ['#9333ea', '#ec4899'],
+    perplexity: ['#0d9488', '#0891b2'],
+    siliconflow: ['#6366f1', '#ec4899'],
+    cohere: ['#059669', '#10b981'],
   };
 
   // Dải màu cho slot tùy chỉnh — mỗi số thứ tự một cặp, quay vòng.

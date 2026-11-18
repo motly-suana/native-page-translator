@@ -13,6 +13,7 @@ const ROOT = path.join(__dirname, '..');
 
 /* ---------- Stub chrome.* ---------- */
 const storageData = new Map();
+const sessionStorageData = new Map();
 const messageListeners = [];
 const installedListeners = [];
 const contextMenuListeners = [];
@@ -53,6 +54,18 @@ const chromeStub = {
         for (const listener of storageChangeListeners) {
           listener(changes, 'local');
         }
+      },
+    },
+    session: {
+      async get(keys) {
+        if (keys === null || keys === undefined) return Object.fromEntries(sessionStorageData);
+        const list = Array.isArray(keys) ? keys : [keys];
+        const out = {};
+        for (const key of list) if (sessionStorageData.has(key)) out[key] = sessionStorageData.get(key);
+        return out;
+      },
+      async set(values) {
+        for (const [key, value] of Object.entries(values)) sessionStorageData.set(key, value);
       },
     },
     onChanged: { addListener(fn) { storageChangeListeners.push(fn); } },
@@ -141,16 +154,23 @@ async function fetchStub(url, options = {}) {
   } else if (u.includes('translate.googleapis.com') || u.includes('translate.google.com')) {
     body = JSON.stringify([[['xin chào', 'hello', null, null, 1]], null, 'vi']);
   } else if (u.includes('generativelanguage')) {
-    // Request vision (có part inline_data) -> trả mảng OCR dạng fence ```json.
+    // Request vision -> fence JSON; request batch (responseMimeType json) -> mảng JSON cùng độ dài; còn lại -> text thường.
     let isVision = false;
+    let batchLen = 0;
     try {
       const parsed = JSON.parse(options.body || '{}');
       isVision = Boolean(parsed.contents?.[0]?.parts?.some(part => part.inline_data));
-    } catch (_) { /* giữ isVision = false */ }
+      if (!isVision && parsed.generationConfig?.responseMimeType === 'application/json') {
+        const items = JSON.parse(parsed.contents?.[0]?.parts?.[0]?.text || '[]');
+        if (Array.isArray(items)) batchLen = items.length;
+      }
+    } catch (_) { /* giữ mặc định */ }
     const textPart = {
       text: isVision
         ? '```json\n[{"original":"Xin chào","translated":"Hello"}]\n```'
-        : 'hello from gemini',
+        : (batchLen > 0
+            ? JSON.stringify(Array.from({ length: batchLen }, (_, i) => `gemini batch ${i}`))
+            : 'hello from gemini'),
     };
     body = JSON.stringify({ candidates: [{ content: { parts: [textPart] } }] });
   } else if (u.includes('deploy.com')) {
@@ -778,7 +798,101 @@ async function main() {
     assert.equal(res.answer, 'hello from gemini');
   }
 
-  console.log('SW smoke test PASS ✔ (background khởi động OK, seed key OK, nativeTranslate OK, providerTranslate OK, proxyFetch OK, dịch ảnh OK, deeplUsage OK, summarizePage OK, fetchPdf OK, menu PDF OK, cache dịch OK, commands OK, badge OK, qaSolveQuestion OK)');
+  // 19. Singleflight coalescing (tab thường dedupe, tab ẩn danh cô lập) + getProviderStatus primaryKind
+  {
+    const status = await sendMessage({ type: 'getProviderStatus' });
+    assert.ok('primaryKind' in status);
+    assert.ok('totalActiveKeys' in status);
+
+    const cfg = storageData.get('tm-multi-provider-config');
+    cfg.preferred = 'deepl';
+    cfg.providers.deepl = { enabled: true, keys: [{ key: 'test-deepl-key-0000:fx', label: 'Test' }] };
+    await chromeStub.storage.local.set({ 'tm-multi-provider-config': cfg });
+    configCacheReset();
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    const before = fetchCalls.length;
+    const [r1, r2] = await Promise.all([
+      sendMessage({ type: 'providerTranslate', payload: { texts: ['Chuỗi singleflight duy nhất'], targetLanguage: 'en' } }, { tab: { id: 1 } }),
+      sendMessage({ type: 'providerTranslate', payload: { texts: ['Chuỗi singleflight duy nhất'], targetLanguage: 'en' } }, { tab: { id: 2 } }),
+    ]);
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    assert.deepEqual(Array.from(r1.translations), Array.from(r2.translations));
+    assert.equal(fetchCalls.length - before, 1, '2 tab thường gửi song song cùng chuỗi chỉ được gọi fetch 1 lần');
+
+    // Tab ẩn danh gửi song song chuỗi mới phải không dùng chung singleflight với tab thường
+    const beforeIncog = fetchCalls.length;
+    const [incogRes, normRes] = await Promise.all([
+      sendMessage({ type: 'providerTranslate', payload: { texts: ['Chuỗi bí mật ẩn danh 123'], targetLanguage: 'en' } }, { tab: { id: 10, incognito: true } }),
+      sendMessage({ type: 'providerTranslate', payload: { texts: ['Chuỗi bí mật ẩn danh 123'], targetLanguage: 'en' } }, { tab: { id: 11, incognito: false } }),
+    ]);
+    assert.equal(incogRes.ok, true);
+    assert.equal(normRes.ok, true);
+    assert.equal(fetchCalls.length - beforeIncog, 2, 'tab ẩn danh và tab thường phải gọi fetch tách biệt');
+  }
+
+  // 20. cancelProviderTranslate với mảng requestIds
+  {
+    const multiCancel = await sendMessage({
+      type: 'cancelProviderTranslate',
+      requestIds: ['req-a', 'req-b'],
+    });
+    assert.equal(multiCancel.ok, true);
+  }
+
+  // 21. Extension-page-only v5.0 handlers: getKeyPoolHealth, pingProviderKeys, quickSwitchEngine
+  {
+    const blockedPool = await sendMessage({ type: 'getKeyPoolHealth' }, { tab: { id: 1 }, url: 'https://evil.example/' });
+    assert.equal(blockedPool.ok, false);
+    const blockedPing = await sendMessage({ type: 'pingProviderKeys' }, { tab: { id: 1 }, url: 'https://evil.example/' });
+    assert.equal(blockedPing.ok, false);
+    const blockedSwitch = await sendMessage({ type: 'quickSwitchEngine', payload: { preferred: 'gemini' } }, { tab: { id: 1 }, url: 'https://evil.example/' });
+    assert.equal(blockedSwitch.ok, false);
+
+    const optionsSender = { url: 'chrome-extension://npt-smoke/options.html' };
+    const pingRes = await sendMessage({ type: 'pingProviderKeys', payload: { providerId: 'deepl' } }, optionsSender);
+    assert.equal(pingRes.ok, true, `pingProviderKeys phải OK: ${pingRes.error}`);
+    assert.ok(pingRes.results.length >= 1);
+    assert.equal(pingRes.results[0].ok, true);
+    assert.ok(pingRes.results[0].latencyMs >= 1);
+
+    const pool = await sendMessage({ type: 'getKeyPoolHealth' }, optionsSender);
+    assert.equal(pool.ok, true);
+    assert.ok(pool.summary.totalKeys >= 1);
+    assert.ok(pool.summary.totalSuccess >= 1);
+
+    const switched = await sendMessage(
+      { type: 'quickSwitchEngine', payload: { preferred: 'gemini', routingStrategy: 'smart-stripe' } },
+      optionsSender,
+    );
+    assert.equal(switched.ok, true);
+    assert.equal(switched.preferred, 'gemini');
+    assert.equal(switched.routingStrategy, 'smart-stripe');
+    const savedCfg = storageData.get('tm-multi-provider-config');
+    assert.equal(savedCfg.preferred, 'gemini');
+    assert.equal(savedCfg.routingStrategy, 'smart-stripe');
+  }
+
+  // 22. Prompt Studio override (`tm-system-prompt-overrides`) truyền vào LLM batch request
+  {
+    await chromeStub.storage.local.set({
+      'tm-system-prompt-overrides': { batch: 'CUSTOM_SYSTEM_RULE_MARKER_V5' },
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const beforeLen = fetchCalls.length;
+    const res = await sendMessage({
+      type: 'providerTranslate',
+      payload: { texts: ['Kiểm tra prompt studio v5'], targetLanguage: 'en' },
+    });
+    assert.equal(res.ok, true);
+    const lastReqBody = JSON.parse(fetchCalls[fetchCalls.length - 1].options.body);
+    const sysText = lastReqBody.systemInstruction?.parts?.[0]?.text || '';
+    assert.ok(fetchCalls.length > beforeLen);
+    assert.ok(sysText.includes('CUSTOM_SYSTEM_RULE_MARKER_V5'), 'Prompt Studio batch override phải đi tới Gemini systemInstruction');
+  }
+
+  console.log('SW smoke test PASS ✔ (background khởi động OK, seed key OK, nativeTranslate OK, providerTranslate OK, proxyFetch OK, dịch ảnh OK, deeplUsage OK, summarizePage OK, fetchPdf OK, menu PDF OK, cache dịch OK, commands OK, badge OK, qaSolveQuestion OK, singleflight & multi-cancel OK, v5.0 pool/ping/switch/studio OK)');
 }
 
 main().catch(error => {

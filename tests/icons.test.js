@@ -82,12 +82,12 @@ function run() {
         if (!ICONS.has(match[1])) missing.push(`${file}: ${match[1]}`);
       }
     }
-    for (const file of ['popup.js', 'options.js', 'content.js']) {
+    for (const file of ['popup.js', 'options.js', 'content.js', 'ocr-panel.js']) {
       const js = fs.readFileSync(path.join(ROOT, file), 'utf8');
       for (const match of js.matchAll(/(?:NPT_ICONS|ICON)\??\.svg\('([^']+)'/g)) {
         if (!ICONS.has(match[1])) missing.push(`${file}: ${match[1]}`);
       }
-      for (const match of js.matchAll(/\bicon\('([^']+)'/g)) {
+      for (const match of js.matchAll(/\bicon(?:Svg)?\('([^']+)'/g)) {
         if (!ICONS.has(match[1])) missing.push(`${file}: ${match[1]}`);
       }
     }

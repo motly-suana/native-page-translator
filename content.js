@@ -46,6 +46,7 @@
     'tm-doc-mode',
     'tm-tts-enabled',
     'tm-tts-rate',
+    'tm-system-prompt-overrides',
     `tm-page-translator-language:${location.hostname}`,
   ];
   const storageCache = await chrome.storage.local.get(STORAGE_WHITELIST);
@@ -79,6 +80,11 @@
     if (areaName !== 'local') return;
     let touched = false;
     for (const [key, change] of Object.entries(changes)) {
+      if (key === 'tm-multi-provider-config') {
+        // Không đưa config chứa API key vào storageCache; chỉ báo hiệu invalidate.
+        touched = true;
+        continue;
+      }
       if (!isAllowedStorageKey(key)) continue;
       touched = true;
       if ('newValue' in change) storageCache[key] = change.newValue;
@@ -126,7 +132,17 @@
     if (docModeSetting === 'on') docMode = true;
     else if (docModeSetting !== 'off') docMode = isDocModePage();
 
-    return { customPrompt, glossaryText, docMode };
+    const overrides = GM_getValue('tm-system-prompt-overrides', null);
+    const systemOverride = (overrides && typeof overrides.batch === 'string')
+      ? overrides.batch.trim().slice(0, 2000)
+      : '';
+
+    return {
+      customPrompt,
+      glossaryText,
+      docMode,
+      ...(systemOverride ? { systemOverride } : {}),
+    };
   }
 
   // about:blank/srcdoc có hostname rỗng → kế thừa origin của chuỗi ancestor (NPT-008):
@@ -267,21 +283,33 @@
       grammarFix: false,
       keepProperNouns: true,
     };
-    const PAGE_STYLE_VALUES = new Set(['natural', 'casual', 'work-email', 'game-chat', 'genz', 'formal']);
+    const PAGE_STYLE_VALUES = new Set(['natural', 'casual', 'work-email', 'game-chat', 'genz', 'formal', 'technical', 'academic']);
     const PAGE_DIALECT_VALUES = new Set(['us', 'uk']);
     const PAGE_MODE_VALUES = new Set(['natural', 'literal']);
 
-    /* Ngữ cảnh trang cho LLM (v4.4): host + title + meta description/og:site_name.
+    /* Ngữ cảnh trang cho LLM (v4.4+): host + title + meta description/og:site_name + outline h1/h2.
      * Giúp model phân giải từ đa nghĩa theo lĩnh vực — "feed" trên MXH là
      * "bảng tin" nhưng trên web thú cưng là "cho ăn/thức ăn". Chỉ đọc vài thẻ
-     * meta nên rẻ; kết quả đi theo pageOptions (đã memo theo URL bên dưới). */
-    const PAGE_CONTEXT_LIMITS = { host: 100, title: 150, siteName: 100, description: 300 };
+     * meta & heading nên rẻ; kết quả đi theo pageOptions (đã memo theo URL bên dưới). */
+    const PAGE_CONTEXT_LIMITS = { host: 100, title: 150, siteName: 100, description: 300, outline: 240 };
     function readMetaContent(selectors) {
       for (const selector of selectors) {
         const content = document.querySelector(selector)?.getAttribute('content');
         if (content && content.trim()) return content.trim();
       }
       return '';
+    }
+    function extractPageOutline() {
+      const headings = document.querySelectorAll('h1, h2');
+      const parts = [];
+      for (const node of headings) {
+        if (parts.length >= 5) break;
+        const text = String(node?.textContent || '').trim().replace(/\s+/g, ' ');
+        if (!text) continue;
+        if (node.getClientRects && node.getClientRects().length === 0) continue;
+        parts.push(text.slice(0, 60));
+      }
+      return parts.join(' › ').slice(0, PAGE_CONTEXT_LIMITS.outline);
     }
     function computePageContext() {
       const host = String(location.hostname || '').trim().slice(0, PAGE_CONTEXT_LIMITS.host);
@@ -294,8 +322,9 @@
         'meta[name="description"]',
         'meta[property="og:description"]',
       ]).slice(0, PAGE_CONTEXT_LIMITS.description);
-      if (!host && !title && !siteName && !description) return null;
-      return { host, title, siteName, description };
+      const outline = extractPageOutline();
+      if (!host && !title && !siteName && !description && !outline) return null;
+      return { host, title, siteName, description, ...(outline ? { outline } : {}) };
     }
 
     // Sanitize nhẹ: style/dialect/mode sai → về default; boolean chỉ tắt khi === false.
@@ -358,10 +387,30 @@
       return `${leading}${String(translated).trim()}${trailing}`;
     }
 
+    let entityDecoder = null;
     function decodeEntities(value) {
       if (!value) return '';
-      const doc = new DOMParser().parseFromString(String(value), 'text/html');
-      return doc.body.textContent || '';
+      const str = String(value);
+      if (!str.includes('&')) return str;
+      if (!entityDecoder && typeof document !== 'undefined') {
+        entityDecoder = document.createElement('textarea');
+      }
+      if (entityDecoder) {
+        try {
+          entityDecoder.innerHTML = str;
+          const decoded = entityDecoder.value || '';
+          entityDecoder.textContent = '';
+          return decoded;
+        } catch (_) {
+          // Trusted Types chặn innerHTML — fallback giải mã các entity phổ biến.
+        }
+      }
+      return str
+        .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+        .replace(/&(amp|lt|gt|quot|#39|apos|nbsp);/g, (m, name) => ({
+          amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'", nbsp: ' ',
+        }[name] || m));
     }
 
     function request(options) {
@@ -489,23 +538,66 @@
     //   - undefined: không gọi (setting tắt/skipProvider) — fallback free là đường chính
     // usePageOptions=true (CHỈ dịch trang) mới kèm văn phong pageOptions; dịch bôi đen
     // và Quick EN của input helper truyền false để giữ prompt gốc như v4.1.
+    function createAbortError() {
+      const error = new Error('Translation aborted');
+      error.name = 'AbortError';
+      error.noSplit = true;
+      return error;
+    }
+
     let providerRequestSeq = 0;
-    async function providerTranslateViaBackground(texts, sourceLanguage, targetLanguage, usePageOptions, skipProvider) {
+    let freeHostCursor = 0;
+    const providerModeCache = { mode: null, expiresAt: 0 };
+    onSettingsChanged(() => { providerModeCache.expiresAt = 0; });
+
+    async function providerTranslateViaBackground(texts, sourceLanguage, targetLanguage, usePageOptions, skipProvider, signal) {
+      if (signal?.aborted) throw createAbortError();
       if (skipProvider) return undefined;
       if (!GM_getValue('tm-page-use-provider', true)) return undefined;
       if (!Array.isArray(texts) || !texts.length) return undefined;
 
-      // requestId để hủy request phía background khi timeout (NPT-007) — timeout
+      // requestId để hủy request phía background khi timeout hoặc abort (NPT-007) — timeout
       // phía content mà không hủy thì request trả phí vẫn chạy ngầm + fallback chồng lên.
       // 190s: phải RỘNG HƠN trần request provider trong background (Deploy suy luận
       // sâu được cấp 120s), nếu không content tự huỷ trước khi provider kịp trả lời.
       const requestId = `${Date.now()}-${++providerRequestSeq}-${Math.random().toString(36).slice(2, 8)}`;
       try {
-        const response = await new Promise(resolve => {
-          const timer = setTimeout(() => {
-            chrome.runtime.sendMessage({ type: 'cancelProviderTranslate', requestId }).catch(() => {});
+        const response = await new Promise((resolve, reject) => {
+          let settled = false;
+          let timer = null;
+
+          const cleanup = () => {
+            if (timer) {
+              clearTimeout(timer);
+              timer = null;
+            }
+            if (signal) signal.removeEventListener('abort', onAbort);
+          };
+
+          const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            chrome.runtime.sendMessage({ type: 'cancelProviderTranslate', requestIds: [requestId] }).catch(() => {});
+            reject(createAbortError());
+          };
+
+          if (signal) {
+            if (signal.aborted) {
+              onAbort();
+              return;
+            }
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
+
+          timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            chrome.runtime.sendMessage({ type: 'cancelProviderTranslate', requestIds: [requestId] }).catch(() => {});
             resolve(null);
           }, 190000);
+
           chrome.runtime.sendMessage({
             type: 'providerTranslate',
             payload: {
@@ -516,10 +608,14 @@
               ...(usePageOptions ? { pageOptions: readPageOptions() } : {}),
             },
           }).then(result => {
-            clearTimeout(timer);
+            if (settled) return;
+            settled = true;
+            cleanup();
             resolve(result);
           }).catch(() => {
-            clearTimeout(timer);
+            if (settled) return;
+            settled = true;
+            cleanup();
             resolve(null);
           });
         });
@@ -528,7 +624,8 @@
         if (!Array.isArray(translations) || translations.length !== texts.length) return null;
         if (!translations.every(item => typeof item === 'string' && item.trim())) return null;
         return translations;
-      } catch (_) {
+      } catch (error) {
+        if (error?.name === 'AbortError' || signal?.aborted) throw error;
         return null;
       }
     }
@@ -537,27 +634,32 @@
     // không âm thầm đổi bên nhận dữ liệu sang Google/MyMemory.
     function assertFreeFallbackAllowed(providerResult) {
       if (providerResult === null && GM_getValue('tm-page-free-fallback', true) === false) {
-        throw new Error('Provider riêng lỗi và bạn đã tắt fallback miễn phí (bật lại trong Cài đặt)');
+        const error = new Error('Provider riêng lỗi và bạn đã tắt fallback miễn phí (bật lại trong Cài đặt)');
+        error.noSplit = true;
+        throw error;
       }
     }
 
-    async function translateRaw(text, sourceLanguage, targetLanguage, usePageOptions, skipProvider) {
+    async function translateRaw(text, sourceLanguage, targetLanguage, usePageOptions, skipProvider, signal) {
+      if (signal?.aborted) throw createAbortError();
       // Ưu tiên API riêng của user; undefined (không gọi) thì xuống endpoint miễn phí.
-      const providerTranslations = await providerTranslateViaBackground([text], sourceLanguage, targetLanguage, usePageOptions, skipProvider);
+      const providerTranslations = await providerTranslateViaBackground([text], sourceLanguage, targetLanguage, usePageOptions, skipProvider, signal);
       if (providerTranslations) return providerTranslations[0].trim();
       assertFreeFallbackAllowed(providerTranslations);
 
       const errors = [];
-      const providers = [
-        () => googleTranslate('https://translate.googleapis.com', text, sourceLanguage, targetLanguage),
-        () => googleTranslate('https://translate.google.com', text, sourceLanguage, targetLanguage),
-      ];
+      // Xoay vòng round-robin giữa googleapis và translate.google.com để cân bằng tải, vẫn fallback host còn lại khi lỗi.
+      const hosts = (freeHostCursor++ & 1) === 0
+        ? ['https://translate.googleapis.com', 'https://translate.google.com']
+        : ['https://translate.google.com', 'https://translate.googleapis.com'];
+      const providers = hosts.map(origin => () => googleTranslate(origin, text, sourceLanguage, targetLanguage));
 
       if (text.length <= 450) {
         providers.push(() => myMemoryTranslate(text, sourceLanguage, targetLanguage));
       }
 
       for (const provider of providers) {
+        if (signal?.aborted) throw createAbortError();
         try {
           return await provider();
         } catch (error) {
@@ -565,6 +667,7 @@
         }
       }
 
+      if (signal?.aborted) throw createAbortError();
       throw new Error(`Dịch miễn phí lỗi: ${errors.join(' · ')}`);
     }
 
@@ -590,7 +693,8 @@
       return chunks;
     }
 
-    async function translate(text, sourceLanguage, targetLanguage, usePageOptions, skipProvider) {
+    async function translate(text, sourceLanguage, targetLanguage, usePageOptions, skipProvider, signal) {
+      if (signal?.aborted) throw createAbortError();
       const original = String(text ?? '');
       const trimmed = original.trim();
       if (!trimmed) return original;
@@ -611,10 +715,11 @@
       const chunks = splitLongText(sourceText);
       const translated = [];
       for (const chunk of chunks) {
+        if (signal?.aborted) throw createAbortError();
         const chunkKey = `${sourceLanguage || 'auto'}\u0000${targetLanguage}\u0000${chunk}\u0000${salt}`;
         let output = cache.get(chunkKey);
         if (!output) {
-          output = await translateRaw(chunk, sourceLanguage || 'auto', targetLanguage, usePageOptions, skipProvider);
+          output = await translateRaw(chunk, sourceLanguage || 'auto', targetLanguage, usePageOptions, skipProvider, signal);
           cacheSet(chunkKey, output);
         }
         translated.push(output);
@@ -625,18 +730,51 @@
       return preserveWhitespace(original, styledFancy ? FANCY.applyStyleToText(output, styledFancy.style) : output);
     }
 
+    function peekCached(text, sourceLanguage, targetLanguage, usePageOptions) {
+      const original = String(text ?? '');
+      const trimmed = original.trim();
+      if (!trimmed) return { text: original };
+
+      const styledFancy = FANCY ? FANCY.normalizeStyledText(trimmed) : null;
+      const sourceText = styledFancy ? styledFancy.text : trimmed;
+      const salt = usePageOptions ? styleCacheSalt() : '';
+      const key = `${sourceLanguage || 'auto'}\u0000${targetLanguage}\u0000${sourceText}\u0000${salt}`;
+      const hit = cache.get(key);
+      if (typeof hit !== 'string') return null;
+      const formatted = styledFancy ? FANCY.applyStyleToText(hit, styledFancy.style) : hit;
+      return { text: preserveWhitespace(original, formatted) };
+    }
+
     /* Trần batch phụ thuộc đường đi:
-     *  - Provider riêng (DeepL/Gemini/OpenAI): background chấp nhận tới 64 đoạn
-     *    / 20000 ký tự mỗi request. Bản cũ luôn gom 2800/28 nên một trang dài
-     *    tốn gấp nhiều lần số round-trip cần thiết — và với LLM là gấp bấy nhiêu
-     *    lần token system instruction bị gửi lặp.
+     *  - Provider riêng (DeepL/Gemini/OpenAI): dùng NPT_PIPELINE.WAVE_PROFILES
+     *    để Wave 0 trả về siêu nhanh và tăng dần thông lượng ở các wave sau.
      *  - Fallback miễn phí: nhồi cả batch vào MỘT chuỗi kèm token phân đoạn rồi
-     *    đẩy qua query string → bắt buộc giữ nhỏ. */
+     *    đẩy qua query string → giữ nhỏ gọn. */
     const FREE_BATCH_LIMITS = { maxChars: 2800, maxItems: 28 };
-    const PROVIDER_BATCH_LIMITS = { maxChars: 15000, maxItems: 48 };
+    const PROVIDER_BATCH_LIMITS = { maxChars: 4500, maxItems: 24 };
 
     function providerPathEnabled() {
       return GM_getValue('tm-page-use-provider', true) !== false;
+    }
+
+    async function getActiveProviderMode() {
+      if (!providerPathEnabled()) return 'free';
+      const now = Date.now();
+      if (providerModeCache.mode && now < providerModeCache.expiresAt) {
+        return providerModeCache.mode;
+      }
+      let mode = 'llm';
+      try {
+        const status = await chrome.runtime.sendMessage({ type: 'getProviderStatus' });
+        if (status?.ok) {
+          mode = !status.configured ? 'free' : (status.primaryKind === 'deepl' ? 'deepl' : 'llm');
+        }
+      } catch (_) {
+        mode = 'llm';
+      }
+      providerModeCache.mode = mode;
+      providerModeCache.expiresAt = Date.now() + 10000;
+      return mode;
     }
 
     function makeBatches(items, limits = FREE_BATCH_LIMITS) {
@@ -657,10 +795,11 @@
       return batches;
     }
 
-    async function translateBundle(batch, sourceLanguage, targetLanguage, usePageOptions) {
+    async function translateBundle(batch, sourceLanguage, targetLanguage, usePageOptions, signal) {
+      if (signal?.aborted) throw createAbortError();
       const salt = usePageOptions ? styleCacheSalt() : '';
       if (batch.length === 1) {
-        return [{ index: batch[0].index, text: await translate(batch[0].text, sourceLanguage, targetLanguage, usePageOptions) }];
+        return [{ index: batch[0].index, text: await translate(batch[0].text, sourceLanguage, targetLanguage, usePageOptions, false, signal) }];
       }
 
       // Ưu tiên API riêng của user — 1 message cho cả batch, không cần token __NPT.
@@ -669,6 +808,8 @@
         sourceLanguage || 'auto',
         targetLanguage,
         usePageOptions,
+        false,
+        signal,
       );
       if (providerTranslations) {
         return batch.map((item, index) => {
@@ -682,24 +823,26 @@
       assertFreeFallbackAllowed(providerTranslations);
 
       /* Batch gom theo trần provider vượt xa giới hạn đường miễn phí → cắt nhỏ
-       * lại trước khi fallback, không đẩy nguyên khối 15k ký tự qua Google. */
+       * lại trước khi fallback, không đẩy nguyên khối qua Google Free. */
       if (batch.length > FREE_BATCH_LIMITS.maxItems
         || batch.reduce((sum, item) => sum + item.text.length, 0) > FREE_BATCH_LIMITS.maxChars) {
         const results = [];
         for (const part of makeBatches(batch, FREE_BATCH_LIMITS)) {
-          results.push(...await translateBundleFree(part, sourceLanguage, targetLanguage, usePageOptions, salt));
+          if (signal?.aborted) throw createAbortError();
+          results.push(...await translateBundleFree(part, sourceLanguage, targetLanguage, usePageOptions, salt, signal));
         }
         return results;
       }
 
-      return translateBundleFree(batch, sourceLanguage, targetLanguage, usePageOptions, salt);
+      return translateBundleFree(batch, sourceLanguage, targetLanguage, usePageOptions, salt, signal);
     }
 
     // Đường miễn phí: gói batch thành 1 chuỗi có token phân đoạn; hỏng thì dịch lẻ.
     // Provider riêng đã thất bại trước khi tới đây nên luôn skipProvider.
-    async function translateBundleFree(batch, sourceLanguage, targetLanguage, usePageOptions, salt) {
+    async function translateBundleFree(batch, sourceLanguage, targetLanguage, usePageOptions, salt, signal) {
+      if (signal?.aborted) throw createAbortError();
       if (batch.length === 1) {
-        return [{ index: batch[0].index, text: await translate(batch[0].text, sourceLanguage, targetLanguage, usePageOptions, true) }];
+        return [{ index: batch[0].index, text: await translate(batch[0].text, sourceLanguage, targetLanguage, usePageOptions, true, signal) }];
       }
 
       const seed = Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -709,7 +852,7 @@
       try {
         // Provider riêng vừa thất bại cho batch này → skipProvider (không re-enter
         // nhiều lần tốn request trả phí, NPT-007); chỉ xuống chuỗi miễn phí.
-        const output = await translateRaw(bundled, sourceLanguage || 'auto', targetLanguage, usePageOptions, true);
+        const output = await translateRaw(bundled, sourceLanguage || 'auto', targetLanguage, usePageOptions, true, signal);
         const positions = tokens.map(token => output.indexOf(token));
         const valid = positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1]));
         if (!valid) throw new Error('API làm mất dấu phân đoạn');
@@ -723,12 +866,15 @@
           cacheSet(key, translated);
           return { index: item.index, text: preserveWhitespace(item.text, translated) };
         });
-      } catch (_) {
+      } catch (err) {
+        if (err?.name === 'AbortError' || signal?.aborted) throw err;
         const results = [];
         for (const item of batch) {
+          if (signal?.aborted) throw createAbortError();
           try {
-            results.push({ index: item.index, text: await translate(item.text, sourceLanguage, targetLanguage, usePageOptions, true) });
+            results.push({ index: item.index, text: await translate(item.text, sourceLanguage, targetLanguage, usePageOptions, true, signal) });
           } catch (error) {
+            if (error?.name === 'AbortError' || signal?.aborted) throw error;
             results.push({ index: item.index, error });
           }
         }
@@ -745,71 +891,130 @@
       return 'other';
     }
 
-    async function translateMany(texts, sourceLanguage, targetLanguage, usePageOptions) {
+    async function translateMany(texts, sourceLanguage, targetLanguage, usePageOptions, options = {}) {
+      const { signal, onBatchComplete } = options || {};
+      if (signal?.aborted) throw createAbortError();
+
       // Font đặc biệt: chuẩn hóa từng đoạn về ASCII trước khi gom batch, nhớ
       // style để gán lại vào kết quả (whitespace rìa giữ nguyên cho preserveWhitespace).
       const items = texts.map((text, index) => {
         const raw = String(text ?? '');
         const styled = FANCY ? FANCY.normalizeStyledText(raw.trim()) : null;
-        if (!styled) return { index, text: raw, styled: null };
+        if (!styled) return { index, raw, text: raw, styled: null };
         const lead = raw.match(/^\s*/u)?.[0] || '';
         const trail = raw.match(/\s*$/u)?.[0] || '';
-        return { index, text: `${lead}${styled.text}${trail}`, styled };
+        return { index, raw, text: `${lead}${styled.text}${trail}`, styled };
       });
       const results = new Array(items.length);
 
-      /* Tra cache TRƯỚC khi gom batch. Bản cũ chỉ tra cache trong translate()
-       * — tức chỉ khi batch còn đúng 1 phần tử — nên mọi lần dịch lại (đổi
-       * display mode, quay về gốc rồi dịch tiếp, SPA render lại cùng nội dung,
-       * footer/menu lặp trên nhiều trang) đều gửi lại toàn bộ cho API. */
+      /* Tra cache TRƯỚC khi gom batch. */
       const salt = usePageOptions ? styleCacheSalt() : '';
       const pending = [];
+      const initialHits = [];
       for (const item of items) {
         const trimmed = item.text.trim();
         const hit = trimmed ? cache.get(`${sourceLanguage || 'auto'}\u0000${targetLanguage}\u0000${trimmed}\u0000${salt}`) : null;
-        if (typeof hit === 'string') results[item.index] = { index: item.index, text: preserveWhitespace(item.text, hit) };
-        else pending.push(item);
-      }
-
-      const byScript = new Map();
-      for (const item of pending) {
-        const cls = detectScriptClass(item.text);
-        if (!byScript.has(cls)) byScript.set(cls, []);
-        byScript.get(cls).push(item);
-      }
-      // Provider riêng đang bật → gom batch sát trần background (ít round-trip hơn hẳn).
-      const batchLimits = providerPathEnabled() ? PROVIDER_BATCH_LIMITS : FREE_BATCH_LIMITS;
-      const batches = [];
-      for (const group of byScript.values()) batches.push(...makeBatches(group, batchLimits));
-      let cursor = 0;
-
-      async function worker() {
-        while (cursor < batches.length) {
-          const batch = batches[cursor++];
-          let translated;
-          try {
-            translated = await translateBundle(batch, sourceLanguage, targetLanguage, usePageOptions);
-          } catch (error) {
-            translated = batch.map(item => ({ index: item.index, error }));
-          }
-          for (const result of translated) results[result.index] = result;
+        if (typeof hit === 'string') {
+          const formatted = item.styled ? FANCY.applyStyleToText(hit, item.styled.style) : hit;
+          const entry = { index: item.index, text: preserveWhitespace(item.raw, formatted) };
+          results[item.index] = entry;
+          initialHits.push(entry);
+        } else {
+          pending.push(item);
         }
       }
 
-      await Promise.all(Array.from({ length: Math.min(3, Math.max(1, batches.length)) }, worker));
-      // Gán lại style font đặc biệt vào kết quả dịch (đoạn nào nguồn là font đặc biệt).
-      if (FANCY) {
-        for (const item of items) {
-          const result = results[item.index];
-          if (item.styled && result?.text) {
-            result.text = FANCY.applyStyleToText(result.text, item.styled.style);
+      if (initialHits.length && typeof onBatchComplete === 'function' && !signal?.aborted) {
+        await onBatchComplete(initialHits);
+      }
+
+      if (!pending.length) return results;
+
+      const mode = await getActiveProviderMode();
+      if (signal?.aborted) throw createAbortError();
+
+      const pipeline = globalThis.NPT_PIPELINE;
+      let batches;
+      if (pipeline?.buildProgressiveBatches) {
+        batches = pipeline.buildProgressiveBatches(pending, { mode });
+      } else {
+        const byScript = new Map();
+        for (const item of pending) {
+          const cls = detectScriptClass(item.text);
+          if (!byScript.has(cls)) byScript.set(cls, []);
+          byScript.get(cls).push(item);
+        }
+        const batchLimits = providerPathEnabled() ? PROVIDER_BATCH_LIMITS : FREE_BATCH_LIMITS;
+        batches = [];
+        for (const group of byScript.values()) batches.push(...makeBatches(group, batchLimits));
+      }
+
+      const concurrency = mode === 'llm' ? 5 : 6;
+      const finalizeBatch = async (translatedBatch) => {
+        const ready = [];
+        for (const res of translatedBatch) {
+          const item = items[res.index];
+          let out = res;
+          if (item?.styled && out?.text) {
+            out = {
+              index: out.index,
+              text: preserveWhitespace(item.raw, FANCY.applyStyleToText(out.text, item.styled.style)),
+            };
+          }
+          results[out.index] = out;
+          ready.push(out);
+        }
+        if (ready.length && typeof onBatchComplete === 'function' && !signal?.aborted) {
+          await onBatchComplete(ready);
+        }
+      };
+
+      if (pipeline?.runProgressiveWorkerPool) {
+        await pipeline.runProgressiveWorkerPool({
+          batches,
+          concurrency,
+          signal,
+          executeBatch: async (batch) => {
+            if (pipeline.translateWithSplitRecovery) {
+              return pipeline.translateWithSplitRecovery(
+                batch,
+                sub => translateBundle(sub, sourceLanguage, targetLanguage, usePageOptions, signal),
+                { minSplitSize: 3, signal },
+              );
+            }
+            return translateBundle(batch, sourceLanguage, targetLanguage, usePageOptions, signal);
+          },
+          onBatchResolved: async (translatedBatch) => {
+            await finalizeBatch(translatedBatch);
+          },
+          onBatchError: async (error, batch) => {
+            if (error?.name === 'AbortError' || signal?.aborted) return;
+            await finalizeBatch(batch.map(item => ({ index: item.index, error })));
+          },
+        });
+      } else {
+        let cursor = 0;
+        async function worker() {
+          while (cursor < batches.length && !signal?.aborted) {
+            const batch = batches[cursor++];
+            let translated;
+            try {
+              translated = await translateBundle(batch, sourceLanguage, targetLanguage, usePageOptions, signal);
+            } catch (error) {
+              if (error?.name === 'AbortError' || signal?.aborted) return;
+              translated = batch.map(item => ({ index: item.index, error }));
+            }
+            await finalizeBatch(translated);
           }
         }
+        await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, batches.length)) }, worker));
       }
+
+      if (signal?.aborted) throw createAbortError();
       return results;
     }
 
-    return { translate, translateMany };
+    return { translate, translateMany, peekCached };
   })();
 
 
@@ -850,16 +1055,20 @@
       --npt-surface: 255,255,255;
       --npt-surface-2: 244,245,249;
       --npt-ink: 23,24,28;
+      --npt-border: 15,23,42;
+      --npt-accent: #6366f1;
     }
     @media (prefers-color-scheme: dark) {
       :host {
-        --npt-surface: 52,56,66;
-        --npt-surface-2: 30,32,39;
+        --npt-surface: 38,42,52;
+        --npt-surface-2: 24,27,34;
         --npt-ink: 236,238,243;
+        --npt-border: 255,255,255;
+        --npt-accent: #818cf8;
       }
     }
     :where(button, [tabindex], a):focus-visible {
-      outline: 2px solid #6366f1;
+      outline: 2px solid var(--npt-accent);
       outline-offset: 2px;
       border-radius: 8px;
     }
@@ -1003,10 +1212,27 @@
   let generation = 0;
   let mutationTimer = null;
   const pendingDynamicRoots = new Set();
+  const activeRunControllers = new Set();
+  const cancelActiveRuns = () => {
+    for (const ctrl of activeRunControllers) {
+      try {
+        ctrl.abort();
+      } catch (_) {
+        // Bỏ qua nếu controller đã huỷ.
+      }
+    }
+    activeRunControllers.clear();
+  };
   const bilingualPairs = new Map(); // text node -> span bản dịch song ngữ
   let bilingualStyleInjected = false;
   let lazyObserver = null;
-  const lazyPending = new Map(); // Element -> Text[] chờ cuộn tới để dịch
+  const lazyPending = new Map(); // Element -> { nodes: Text[], attrs: Array<{element: Element, attribute: string}> }
+  const lazyReadyNodes = new Set();
+  const lazyReadyAttrs = new Map(); // Element -> Set<string>
+  let lazyFlushTimer = null;
+  let lazyScrollFallbackTimer = null;
+  let lazyScrollListenersInstalled = false;
+  let lazyIsScrolling = false;
   let toolbarHost = null;
   let statusElement = null;
   let fabElement = null;
@@ -1075,12 +1301,20 @@
   const URL_ONLY_TEXT = /^(https?:\/\/|www\.)\S+$/i;
 
   function isUsefulText(value) {
+    const cfg = scanConfig();
+    if (globalThis.NPT_PIPELINE?.isTranslatableText) {
+      return globalThis.NPT_PIPELINE.isTranslatableText(value, {
+        minLength: CONFIG.minimumTextLength,
+        skipUsernames: cfg.skipUsernames,
+        skipCode: cfg.skipCode,
+      });
+    }
     const text = String(value ?? '').trim();
     if (text.length < CONFIG.minimumTextLength) return false;
     if (!/\p{L}/u.test(text)) return false;
     if (URL_ONLY_TEXT.test(text)) return false;
     // Handle đứng một mình (@nick, u/abc) — không phải câu cần dịch.
-    if (scanConfig().skipUsernames && USERNAME_HANDLE_PATTERNS.some(pattern => pattern.test(text))) return false;
+    if (cfg.skipUsernames && USERNAME_HANDLE_PATTERNS.some(pattern => pattern.test(text))) return false;
     return true;
   }
 
@@ -1267,7 +1501,7 @@
     const style = document.createElement('style');
     style.id = 'npt-bilingual-style';
     style.dataset.tmNoTranslate = 'true';
-    style.textContent = '.npt-bilingual-translation{display:block;opacity:.72;font-size:.93em;margin-top:2px}'
+    style.textContent = '.npt-bilingual-translation{display:block;opacity:.72;font-size:.93em;margin-top:2px;contain:layout style}'
       + '.npt-bilingual-inline{display:inline;margin-left:4px;opacity:.72}';
     (document.head || document.documentElement).appendChild(style);
     bilingualStyleInjected = true;
@@ -1275,7 +1509,7 @@
 
   // Chèn/cập nhật span bản dịch song ngữ (idempotent qua bilingualPairs).
   // data-tm-no-translate để MutationObserver không tự dịch bản dịch (loop).
-  function upsertBilingualSpan(node, translated) {
+  function upsertBilingualSpan(node, translated, precomputedInline) {
     if (!node.isConnected) {
       const stale = bilingualPairs.get(node);
       if (stale) {
@@ -1303,13 +1537,20 @@
 
     // Parent inline (a, strong, span...) → chèn SAU cả element để không phá dòng;
     // ngược lại chèn ngay sau text node (span hiển thị block bên dưới).
-    let display = '';
-    try {
-      display = getComputedStyle(parent).display;
-    } catch (_) {
-      display = '';
+    // Nhận precomputedInline từ pha Read để tránh Read/Write Layout Thrashing.
+    let isInline;
+    if (typeof precomputedInline === 'boolean') {
+      isInline = precomputedInline;
+    } else {
+      let display = '';
+      try {
+        display = getComputedStyle(parent).display;
+      } catch (_) {
+        display = '';
+      }
+      isInline = display.startsWith('inline');
     }
-    if (display.startsWith('inline')) {
+    if (isInline) {
       span.classList.add('npt-bilingual-inline');
       parent.after(span);
     } else {
@@ -1320,7 +1561,7 @@
 
   // Áp bản dịch cho text node theo display-mode hiện tại:
   // 'replace' thay node.data như cũ; 'bilingual' giữ nguyên gốc + chèn span.
-  function applyTextTranslation(node, translated, original) {
+  function applyTextTranslation(node, translated, original, precomputedInline) {
     if (!node.isConnected) return;
 
     if (pageSetting('tm-page-display-mode') !== 'bilingual') {
@@ -1335,7 +1576,7 @@
 
     // Node có thể đang giữ bản replace từ lần dịch trước → trả về bản gốc trước.
     if (typeof original === 'string' && node.data !== original) safelySetText(node, original);
-    upsertBilingualSpan(node, translated);
+    upsertBilingualSpan(node, translated, precomputedInline);
   }
 
   /* Tiến trình dịch trang, đọc được từ popup (getPageState). Thanh status của
@@ -1391,26 +1632,6 @@
     }
   }
 
-  function isJobInViewport(job) {
-    try {
-      const el = job.kind === 'attribute' ? job.element : job.node?.parentElement;
-      if (!el || !el.getBoundingClientRect) return false;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return false;
-      const vp = window.visualViewport;
-      const vHeight = vp?.height || window.innerHeight || document.documentElement.clientHeight;
-      const vWidth = vp?.width || window.innerWidth || document.documentElement.clientWidth;
-      return (
-        rect.bottom >= 0 &&
-        rect.top <= vHeight &&
-        rect.right >= 0 &&
-        rect.left <= vWidth
-      );
-    } catch (_) {
-      return false;
-    }
-  }
-
   async function translateTargets(textNodes, attributeTargets, language, runGeneration) {
     let completed = 0;
     let failed = 0;
@@ -1427,13 +1648,19 @@
       jobs.push({ kind: 'attribute', element, attribute, record, original: record.original });
     }
 
-    jobs.sort((a, b) => (isJobInViewport(b) ? 1 : 0) - (isJobInViewport(a) ? 1 : 0));
-
     const total = jobs.length;
-    const updateProgress = () => {
+    if (!total) return { completed: 0, failed: 0 };
+
+    const updateProgress = (force = false) => {
       if (runGeneration !== generation || language !== currentLanguage) return;
       setProgress(completed, total, failed);
       setStatus(`Đang dịch ${completed}/${total}${failed ? ` · lỗi ${failed}` : ''}`);
+      if (fabLangElement && translationProgress.busy && total > 0 && completed < total) {
+        const pct = Math.max(0, Math.min(99, Math.round((completed / total) * 100)));
+        fabLangElement.textContent = `${pct}%`;
+      } else if (fabLangElement && (!translationProgress.busy || completed >= total) && force) {
+        fabLangElement.textContent = currentLanguage === 'original' ? '' : currentLanguage.toUpperCase();
+      }
     };
 
     // Cache trong record chỉ hợp lệ khi cùng style signature hiện tại (cả text lẫn
@@ -1445,54 +1672,142 @@
       return record.sig === activeSig;
     };
 
+    async function applyResolvedJobs(batchJobs) {
+      if (!batchJobs.length) return;
+      const isBilingual = pageSetting('tm-page-display-mode') === 'bilingual';
+
+      // Pha 1 (Read): đọc getComputedStyle một lượt trước khi ghi DOM để tránh Layout Thrashing.
+      const inlineMap = isBilingual ? new Map() : null;
+      if (isBilingual) {
+        for (const job of batchJobs) {
+          if (job.kind !== 'text' || !job.node?.isConnected) continue;
+          const parent = job.node.parentElement;
+          if (!parent || inlineMap.has(parent)) continue;
+          let isInline = false;
+          try {
+            isInline = getComputedStyle(parent).display.startsWith('inline');
+          } catch (_) {
+            isInline = false;
+          }
+          inlineMap.set(parent, isInline);
+        }
+      }
+
+      // Pha 2 (Write): cập nhật DOM và nhường main thread mỗi ~50ms để giữ INP mượt.
+      const deadlineRef = { value: performance.now() + 50 };
+      let writtenSinceYield = 0;
+
+      for (const job of batchJobs) {
+        if (runGeneration !== generation || language !== currentLanguage) break;
+        try {
+          if (job.error) throw job.error;
+          const translatedText = job.record[language];
+          if (!translatedText) throw new Error('Không nhận được kết quả dịch');
+
+          // NPT-009: SPA đã đổi nội dung node trong lúc chờ dịch → bỏ kết quả cũ,
+          // không ghi đè text mới; mutation observer sẽ xếp hàng dịch lại bản mới.
+          if (job.record.original !== job.original) continue;
+
+          if (job.kind === 'text') {
+            if (job.node.isConnected) {
+              const parent = job.node.parentElement;
+              const precomputedInline = inlineMap && parent ? inlineMap.get(parent) : undefined;
+              applyTextTranslation(job.node, translatedText, job.record.original, precomputedInline);
+            }
+          } else if (job.element.isConnected) {
+            safelySetAttribute(job.element, job.attribute, translatedText);
+          }
+        } catch (error) {
+          failed++;
+          console.warn('[Page Translator] Lỗi dịch:', error, job.original);
+        } finally {
+          completed++;
+          writtenSinceYield++;
+        }
+
+        if (writtenSinceYield >= 24 && globalThis.NPT_PIPELINE?.yieldToMain) {
+          writtenSinceYield = 0;
+          await globalThis.NPT_PIPELINE.yieldToMain(deadlineRef, 50);
+          if (runGeneration !== generation || language !== currentLanguage) break;
+        }
+      }
+
+      updateProgress();
+    }
+
+    const immediateCachedJobs = [];
     const uniqueOriginals = [];
-    const originalIndex = new Map();
+    const jobsByOriginal = new Map();
+
     for (const job of jobs) {
-      if (hasValidCache(job.record)) continue;
-      if (!originalIndex.has(job.original)) {
-        originalIndex.set(job.original, uniqueOriginals.length);
+      if (hasValidCache(job.record)) {
+        immediateCachedJobs.push(job);
+        continue;
+      }
+      const memHit = TRANSLATION_CORE.peekCached?.(job.original, 'auto', language, true);
+      if (memHit && typeof memHit.text === 'string') {
+        job.record[language] = memHit.text;
+        if ('sig' in job.record) job.record.sig = activeSig;
+        immediateCachedJobs.push(job);
+        continue;
+      }
+      let list = jobsByOriginal.get(job.original);
+      if (!list) {
+        list = [];
+        jobsByOriginal.set(job.original, list);
         uniqueOriginals.push(job.original);
       }
+      list.push(job);
     }
 
-    let translatedResults = [];
-    if (uniqueOriginals.length) {
-      translatedResults = await TRANSLATION_CORE.translateMany(uniqueOriginals, 'auto', language, true);
+    if (immediateCachedJobs.length) {
+      await applyResolvedJobs(immediateCachedJobs);
     }
 
-    const resultByOriginal = new Map();
-    for (let index = 0; index < uniqueOriginals.length; index++) {
-      resultByOriginal.set(uniqueOriginals[index], translatedResults[index]);
-    }
+    if (uniqueOriginals.length && runGeneration === generation && language === currentLanguage) {
+      const controller = new AbortController();
+      activeRunControllers.add(controller);
 
-    for (const job of jobs) {
-      if (runGeneration !== generation || language !== currentLanguage) break;
+      let applyQueue = Promise.resolve();
+      const enqueueBatch = (batchEntries) => {
+        if (controller.signal.aborted || runGeneration !== generation || language !== currentLanguage) {
+          return applyQueue;
+        }
+        const batchJobs = [];
+        for (const entry of batchEntries) {
+          const original = uniqueOriginals[entry.index];
+          const targets = jobsByOriginal.get(original);
+          if (!targets) continue;
+          for (const targetJob of targets) {
+            if (entry.error || !entry.text) {
+              batchJobs.push({ ...targetJob, error: entry.error || new Error('Không nhận được kết quả dịch') });
+            } else {
+              targetJob.record[language] = entry.text;
+              if ('sig' in targetJob.record) targetJob.record.sig = activeSig;
+              batchJobs.push(targetJob);
+            }
+          }
+        }
+        applyQueue = applyQueue.then(() => applyResolvedJobs(batchJobs));
+        return applyQueue;
+      };
+
       try {
-        if (!hasValidCache(job.record)) {
-          const result = resultByOriginal.get(job.original);
-          if (!result || result.error) throw result?.error || new Error('Không nhận được kết quả dịch');
-          job.record[language] = result.text;
-          if ('sig' in job.record) job.record.sig = activeSig;
-        }
-
-        // NPT-009: SPA đã đổi nội dung node trong lúc chờ dịch → bỏ kết quả cũ,
-        // không ghi đè text mới; mutation observer sẽ xếp hàng dịch lại bản mới.
-        if (job.record.original !== job.original) continue;
-
-        if (job.kind === 'text') {
-          if (job.node.isConnected) applyTextTranslation(job.node, job.record[language], job.record.original);
-        } else if (job.element.isConnected) {
-          safelySetAttribute(job.element, job.attribute, job.record[language]);
-        }
+        await TRANSLATION_CORE.translateMany(uniqueOriginals, 'auto', language, true, {
+          signal: controller.signal,
+          onBatchComplete: enqueueBatch,
+        });
+        await applyQueue;
       } catch (error) {
-        failed++;
-        console.warn('[Page Translator] Lỗi dịch:', error, job.original);
+        if (error?.name !== 'AbortError') {
+          console.warn('[Page Translator] Lỗi luồng dịch trang:', error);
+        }
       } finally {
-        completed++;
-        if (completed % 10 === 0 || completed === total) updateProgress();
+        activeRunControllers.delete(controller);
       }
     }
 
+    updateProgress(true);
     return { completed, failed };
   }
 
@@ -1500,9 +1815,6 @@
   function splitByViewport(textNodes) {
     const inView = [];
     const outView = [];
-    // Nhiều text node dùng chung một parent (mỗi <p> thường có vài node). Nhớ
-    // kết quả theo parent để không lặp getBoundingClientRect — mỗi lần gọi là
-    // một forced layout, nhân với vài nghìn node thì thấy rõ khựng.
     const seen = new Map();
     const top = innerHeight * 1.5;
     const bottom = -innerHeight * 0.5;
@@ -1515,7 +1827,10 @@
         if (parent) {
           try {
             const rect = parent.getBoundingClientRect();
-            visible = rect.top < top && rect.bottom > bottom;
+            const isRendered = globalThis.NPT_PIPELINE?.isElementVisiblyRendered
+              ? globalThis.NPT_PIPELINE.isElementVisiblyRendered(parent, rect)
+              : (rect.width > 0 || rect.height > 0);
+            visible = isRendered && rect.top < top && rect.bottom > bottom;
           } catch (_) {
             visible = false;
           }
@@ -1533,68 +1848,162 @@
     return inView.concat(outView);
   }
 
-  // Lazy translate: hủy toàn bộ node đang chờ cuộn (đổi ngôn ngữ, về bản gốc, lazy tắt).
+  // Lazy translate: hủy toàn bộ node/attribute đang chờ cuộn (đổi ngôn ngữ, về bản gốc, lazy tắt).
   function disconnectLazyObserver() {
+    clearTimeout(lazyFlushTimer);
+    lazyFlushTimer = null;
+    clearTimeout(lazyScrollFallbackTimer);
+    lazyScrollFallbackTimer = null;
+    lazyIsScrolling = false;
+    lazyReadyNodes.clear();
+    lazyReadyAttrs.clear();
     if (lazyObserver) lazyObserver.disconnect();
     lazyObserver = null;
     lazyPending.clear();
   }
 
-  // Gắn IntersectionObserver lên parentElement của từng node ngoài viewport;
-  // element vào khung nhìn → dịch nhóm node đó rồi unobserve.
-  /* Một IntersectionObserver duy nhất cho cả phiên dịch. Bản cũ tạo observer
-   * MỚI mỗi lần gọi rồi observe lại toàn bộ lazyPending — giờ dịch động cũng
-   * đẩy node vào đây nên cách đó vừa lãng phí vừa bỏ rơi observer cũ.
-   * Ngôn ngữ/generation đọc tại thời điểm intersect, không capture lúc đăng ký. */
+  function flushLazyReady() {
+    clearTimeout(lazyFlushTimer);
+    lazyFlushTimer = null;
+
+    if (!lazyReadyNodes.size && !lazyReadyAttrs.size) return;
+
+    const nodes = [];
+    for (const node of lazyReadyNodes) {
+      if (node?.isConnected) nodes.push(node);
+    }
+    lazyReadyNodes.clear();
+
+    const attrs = [];
+    for (const [element, attrSet] of lazyReadyAttrs) {
+      if (!element?.isConnected) continue;
+      for (const attribute of attrSet) {
+        attrs.push({ element, attribute });
+      }
+    }
+    lazyReadyAttrs.clear();
+
+    const language = currentLanguage;
+    if (language === 'original' || (!nodes.length && !attrs.length)) return;
+    const runGeneration = generation;
+
+    translateTargets(nodes, attrs, language, runGeneration).then(() => {
+      if (language !== currentLanguage || runGeneration !== generation) return;
+      if (!lazyPending.size && !lazyReadyNodes.size && !lazyReadyAttrs.size) {
+        setStatus(language === 'vi' ? 'Đã dịch sang tiếng Việt' : 'Translated to English');
+      }
+    });
+  }
+
+  function scheduleLazyFlush() {
+    clearTimeout(lazyFlushTimer);
+    const delay = lazyIsScrolling ? 140 : 45;
+    lazyFlushTimer = setTimeout(flushLazyReady, delay);
+  }
+
+  function ensureLazyScrollListeners() {
+    if (lazyScrollListenersInstalled) return;
+    lazyScrollListenersInstalled = true;
+
+    const onScrollEnd = () => {
+      lazyIsScrolling = false;
+      clearTimeout(lazyScrollFallbackTimer);
+      lazyScrollFallbackTimer = null;
+      if (currentLanguage === 'original') return;
+      if (lazyReadyNodes.size || lazyReadyAttrs.size) {
+        flushLazyReady();
+      }
+    };
+
+    window.addEventListener('scrollend', onScrollEnd, { capture: true, passive: true });
+    window.addEventListener('scroll', () => {
+      if (currentLanguage === 'original') return;
+      if (!lazyPending.size && !lazyReadyNodes.size && !lazyReadyAttrs.size) return;
+      lazyIsScrolling = true;
+      clearTimeout(lazyFlushTimer);
+      lazyFlushTimer = null;
+      if (!('onscrollend' in window)) {
+        clearTimeout(lazyScrollFallbackTimer);
+        lazyScrollFallbackTimer = setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('scrollend'));
+        }, 100);
+      } else if (lazyReadyNodes.size || lazyReadyAttrs.size) {
+        lazyFlushTimer = setTimeout(flushLazyReady, 140);
+      }
+    }, { capture: true, passive: true });
+  }
+
   function ensureLazyObserver() {
     if (lazyObserver) return lazyObserver;
+    ensureLazyScrollListeners();
     lazyObserver = new IntersectionObserver(entries => {
-      const ready = [];
+      let added = false;
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         lazyObserver.unobserve(entry.target);
         const group = lazyPending.get(entry.target);
         lazyPending.delete(entry.target);
-        if (group) ready.push(...group);
-      }
-      if (!ready.length) return;
+        if (!group) continue;
 
-      const language = currentLanguage;
-      if (language === 'original') return;
-      const runGeneration = generation;
-      const alive = ready.filter(node => node.isConnected);
-      if (!alive.length) return;
-
-      translateTargets(alive, [], language, runGeneration).then(() => {
-        if (language !== currentLanguage || runGeneration !== generation) return;
-        if (!lazyPending.size) {
-          setStatus(language === 'vi' ? 'Đã dịch sang tiếng Việt' : 'Translated to English');
+        for (const node of group.nodes) {
+          if (node?.isConnected) {
+            lazyReadyNodes.add(node);
+            added = true;
+          }
         }
-      });
-    }, { rootMargin: '250px 0px' });
+        for (const target of group.attrs) {
+          if (target?.element?.isConnected) {
+            let attrSet = lazyReadyAttrs.get(target.element);
+            if (!attrSet) {
+              attrSet = new Set();
+              lazyReadyAttrs.set(target.element, attrSet);
+            }
+            attrSet.add(target.attribute);
+            added = true;
+          }
+        }
+      }
+      if (!added || currentLanguage === 'original') return;
+      scheduleLazyFlush();
+    }, { rootMargin: '650px 0px' });
     return lazyObserver;
   }
 
-  function observeLazyNodes(nodes, language, runGeneration) {
+  function observeLazyTargets(textNodes, attributeTargets, language, runGeneration) {
+    const nodesList = Array.isArray(textNodes) ? textNodes : [];
+    const attrsList = Array.isArray(attributeTargets) ? attributeTargets : [];
+    if (!nodesList.length && !attrsList.length) return;
+
     // Trình duyệt không có IntersectionObserver → dịch thẳng, không lazy.
     if (typeof IntersectionObserver !== 'function') {
-      translateTargets(nodes, [], language, runGeneration);
+      translateTargets(nodesList, attrsList, language, runGeneration);
       return;
     }
 
     const fresh = [];
-    for (const node of nodes) {
-      if (!node.isConnected) continue;
+    const ensureGroup = (element) => {
+      let group = lazyPending.get(element);
+      if (!group) {
+        group = { nodes: [], attrs: [] };
+        lazyPending.set(element, group);
+        fresh.push(element);
+      }
+      return group;
+    };
+
+    for (const node of nodesList) {
+      if (!node?.isConnected) continue;
       const parent = node.parentElement;
       if (!parent) continue;
-      const group = lazyPending.get(parent);
-      if (group) {
-        group.push(node);
-        continue;
-      }
-      lazyPending.set(parent, [node]);
-      fresh.push(parent);
+      ensureGroup(parent).nodes.push(node);
     }
+
+    for (const target of attrsList) {
+      const element = target?.element;
+      if (!element?.isConnected) continue;
+      ensureGroup(element).attrs.push(target);
+    }
+
     if (!fresh.length) return;
 
     const observer = ensureLazyObserver();
@@ -1667,6 +2076,7 @@
       return;
     }
 
+    cancelActiveRuns();
     currentLanguage = language;
     const runGeneration = ++generation;
     disconnectLazyObserver();
@@ -1680,6 +2090,7 @@
     updateActiveButton();
 
     if (language === 'original') {
+      stopObserver();
       restoreOriginalContent();
       translationProgress.busy = false;
       setProgress(0, 0, 0);
@@ -1693,9 +2104,8 @@
       showPageToast('📄 Chế độ tài liệu: giữ nguyên code block');
     }
 
-    // Shadow root xuất hiện lúc trang chưa dịch không được handleMutations
-    // theo dõi (nó bỏ qua hoàn toàn khi ở bản gốc) → nhặt lại ngay trước khi quét.
-    discoverAndObserveMutationRoots(document.documentElement);
+    // Bắt đầu theo dõi DOM & shadow root chỉ khi người dùng thực sự dịch trang (0% tải lúc idle).
+    startObserver();
 
     const uniqueTextNodes = new Set();
     const uniqueAttributeTargets = new Map();
@@ -1714,48 +2124,71 @@
     }
 
     const allTextNodes = [...uniqueTextNodes];
-    // Lazy bật: chỉ dịch ngay bucket trong viewport, phần ngoài chờ cuộn tới.
-    const lazyEnabled = pageSetting('tm-page-lazy-translate') !== false;
-    let textNodes;
-    let lazyNodes = [];
-    if (lazyEnabled) {
-      const buckets = splitByViewport(allTextNodes);
-      textNodes = buckets.inView;
-      lazyNodes = buckets.outView;
-    } else {
-      textNodes = orderViewportFirst(allTextNodes);
-    }
-
-    const attributeTargets = [];
+    const allAttributeTargets = [];
     for (const [element, attributes] of uniqueAttributeTargets) {
-      for (const attribute of attributes) attributeTargets.push({ element, attribute });
+      for (const attribute of attributes) allAttributeTargets.push({ element, attribute });
     }
 
     for (const node of allTextNodes) getTextRecord(node);
-    for (const { element, attribute } of attributeTargets) getAttributeRecord(element, attribute);
+    for (const { element, attribute } of allAttributeTargets) getAttributeRecord(element, attribute);
 
-    if (!allTextNodes.length && !attributeTargets.length) {
+    if (!allTextNodes.length && !allAttributeTargets.length) {
       setStatus(language === 'vi' ? 'Không tìm thấy chữ cần dịch' : 'No translatable text found');
       return;
     }
 
+    // Lazy bật: tách hero + near-viewport để dịch ngay (bỏ qua phần tử ẩn display:none
+    // có rect 0x0 và đẩy các phần tử + attribute xa khung nhìn xuống lazyObserver).
+    const lazyEnabled = pageSetting('tm-page-lazy-translate') !== false;
+    let textNodes;
+    let attributeTargets;
+    let lazyNodes = [];
+    let lazyAttrs = [];
+    if (lazyEnabled && globalThis.NPT_PIPELINE?.partitionTargetsByViewport) {
+      const partitioned = globalThis.NPT_PIPELINE.partitionTargetsByViewport(allTextNodes, allAttributeTargets);
+      textNodes = partitioned.heroTextNodes.concat(partitioned.nearTextNodes);
+      attributeTargets = partitioned.viewportAttributes;
+      lazyNodes = partitioned.offscreenTextNodes;
+      lazyAttrs = partitioned.offscreenAttributes;
+    } else if (lazyEnabled) {
+      const buckets = splitByViewport(allTextNodes);
+      textNodes = buckets.inView;
+      attributeTargets = allAttributeTargets;
+      lazyNodes = buckets.outView;
+    } else {
+      textNodes = orderViewportFirst(allTextNodes);
+      attributeTargets = allAttributeTargets;
+    }
+
     const immediateTotal = textNodes.length + attributeTargets.length;
+    if (!immediateTotal) {
+      if (lazyNodes.length || lazyAttrs.length) observeLazyTargets(lazyNodes, lazyAttrs, language, runGeneration);
+      setStatus((lazyPending.size || lazyReadyNodes.size || lazyReadyAttrs.size)
+        ? 'Đã dịch phần hiển thị · cuộn để dịch tiếp'
+        : (language === 'vi' ? 'Đã dịch sang tiếng Việt' : 'Translated to English'));
+      return;
+    }
+
     translationProgress.busy = true;
     setProgress(0, immediateTotal, 0);
     setStatus(`Đang dịch 0/${immediateTotal}`);
-    let result;
+    let result = { completed: 0, failed: 0 };
     try {
       result = await translateTargets(textNodes, attributeTargets, language, runGeneration);
     } finally {
-      translationProgress.busy = false;
+      if (runGeneration === generation) {
+        translationProgress.busy = false;
+        updateActiveButton();
+      }
     }
 
     if (runGeneration !== generation || language !== currentLanguage) return;
-    if (lazyNodes.length) observeLazyNodes(lazyNodes, language, runGeneration);
+    if (lazyNodes.length || lazyAttrs.length) observeLazyTargets(lazyNodes, lazyAttrs, language, runGeneration);
+    const hasLazyRemaining = Boolean(lazyPending.size || lazyReadyNodes.size || lazyReadyAttrs.size);
     setStatus(
       result.failed
         ? `Đã dịch · ${result.failed} mục lỗi`
-        : lazyPending.size
+        : hasLazyRemaining
           ? 'Đã dịch phần hiển thị · cuộn để dịch tiếp'
           : language === 'vi' ? 'Đã dịch sang tiếng Việt' : 'Translated to English',
       result.failed > 0,
@@ -1858,41 +2291,49 @@
       }
 
       const textNodes = [...uniqueTextNodes];
-      const attributeTargets = [];
+      const allAttributeTargets = [];
       for (const [element, attributes] of uniqueAttributeTargets) {
-        for (const attribute of attributes) attributeTargets.push({ element, attribute });
+        for (const attribute of attributes) allAttributeTargets.push({ element, attribute });
       }
 
       for (const node of textNodes) getTextRecord(node);
-      for (const { element, attribute } of attributeTargets) getAttributeRecord(element, attribute);
+      for (const { element, attribute } of allAttributeTargets) getAttributeRecord(element, attribute);
 
-      /* "Dịch lướt theo khung nhìn" trước đây chỉ áp dụng cho lần dịch ĐẦU.
-       * Nội dung do infinite scroll / SPA bơm vào sau đó luôn được dịch hết,
-       * kể cả phần nằm cách viewport vài màn hình — tức trên đúng loại trang
-       * ngốn quota nhất thì tuỳ chọn tiết kiệm quota lại không có tác dụng. */
+      /* "Dịch lướt theo khung nhìn" áp dụng cho cả nội dung động và attribute ngoài khung nhìn;
+       * đồng thời lọc bỏ các phần tử display:none (rect 0x0). */
       let immediateNodes = textNodes;
+      let immediateAttributes = allAttributeTargets;
       let deferredNodes = [];
-      if (pageSetting('tm-page-lazy-translate') !== false && textNodes.length) {
-        const buckets = splitByViewport(textNodes);
-        immediateNodes = buckets.inView;
-        deferredNodes = buckets.outView;
+      let deferredAttrs = [];
+      if (pageSetting('tm-page-lazy-translate') !== false && (textNodes.length || allAttributeTargets.length)) {
+        if (globalThis.NPT_PIPELINE?.partitionTargetsByViewport) {
+          const partitioned = globalThis.NPT_PIPELINE.partitionTargetsByViewport(textNodes, allAttributeTargets);
+          immediateNodes = partitioned.heroTextNodes.concat(partitioned.nearTextNodes);
+          immediateAttributes = partitioned.viewportAttributes;
+          deferredNodes = partitioned.offscreenTextNodes;
+          deferredAttrs = partitioned.offscreenAttributes;
+        } else {
+          const buckets = splitByViewport(textNodes);
+          immediateNodes = buckets.inView;
+          deferredNodes = buckets.outView;
+        }
       }
 
       // NPT-010: vượt budget cửa sổ 60s thì dừng dịch động — không bơm request nền.
       const dynamicChars = immediateNodes.reduce((sum, node) => sum + String(node.data || '').length, 0);
-      if ((immediateNodes.length || attributeTargets.length) && !dynamicBudgetAllow(dynamicChars)) {
+      if ((immediateNodes.length || immediateAttributes.length) && !dynamicBudgetAllow(dynamicChars)) {
         setStatus('Tạm dừng dịch động — quá nhiều nội dung mới, tự tiếp tục sau ít phút', true);
         return;
       }
 
-      if (immediateNodes.length || attributeTargets.length) {
-        await translateTargets(immediateNodes, attributeTargets, language, runGeneration);
+      if (immediateNodes.length || immediateAttributes.length) {
+        await translateTargets(immediateNodes, immediateAttributes, language, runGeneration);
         if (runGeneration === generation && language === currentLanguage) {
           setStatus(language === 'vi' ? 'Đã cập nhật phần nội dung mới' : 'New content translated');
         }
       }
-      if (deferredNodes.length && runGeneration === generation && language === currentLanguage) {
-        observeLazyNodes(deferredNodes, language, runGeneration);
+      if ((deferredNodes.length || deferredAttrs.length) && runGeneration === generation && language === currentLanguage) {
+        observeLazyTargets(deferredNodes, deferredAttrs, language, runGeneration);
       }
     }, CONFIG.mutationDebounceMs);
   }
@@ -1956,10 +2397,10 @@
 
       if (mutation.type === 'childList') {
         for (const node of mutation.addedNodes) {
-          if (!isToolbarNode(node)) {
-            addedRoots.add(node);
-            discoverAndObserveMutationRoots(node);
-          }
+          if (isToolbarNode(node)) continue;
+          if (node.nodeType === Node.ELEMENT_NODE && node.closest?.('[data-tm-no-translate]')) continue;
+          addedRoots.add(node);
+          discoverAndObserveMutationRoots(node);
         }
       }
     }
@@ -3224,7 +3665,7 @@
     }, { passive: true, capture: true });
   }
 
-  const observedMutationRoots = new WeakSet();
+  let observedMutationRoots = new WeakSet();
   const pageMutationObserver = new MutationObserver(handleMutations);
 
   function observeMutationRoot(root) {
@@ -3256,6 +3697,11 @@
     discoverAndObserveMutationRoots(document.documentElement);
   }
 
+  function stopObserver() {
+    pageMutationObserver.disconnect();
+    observedMutationRoots = new WeakSet();
+  }
+
   // Đổi kiểu hiển thị (replace ↔ song ngữ): KHÔNG dịch lại — restore rồi áp lại
   // bản dịch đã cache trong records theo mode mới.
   function rerenderDisplayMode() {
@@ -3264,10 +3710,31 @@
 
     restoreOriginalContent();
     const activeSig = pageStyleSignature();
+    const isBilingual = pageSetting('tm-page-display-mode') === 'bilingual';
+
+    // Pha 1 (Read): đọc getComputedStyle một lượt trước khi chạm DOM.
+    const inlineMap = isBilingual ? new Map() : null;
+    if (isBilingual) {
+      for (const [node, record] of textRecords) {
+        if (!node.isConnected || !(record[language] && record.sig === activeSig)) continue;
+        const parent = node.parentElement;
+        if (!parent || inlineMap.has(parent)) continue;
+        let isInline = false;
+        try {
+          isInline = getComputedStyle(parent).display.startsWith('inline');
+        } catch (_) {
+          isInline = false;
+        }
+        inlineMap.set(parent, isInline);
+      }
+    }
+
     for (const [node, record] of textRecords) {
       if (!node.isConnected) continue;
       if (record[language] && record.sig === activeSig) {
-        applyTextTranslation(node, record[language], record.original);
+        const parent = node.parentElement;
+        const precomputedInline = inlineMap && parent ? inlineMap.get(parent) : undefined;
+        applyTextTranslation(node, record[language], record.original, precomputedInline);
       }
     }
     for (const [element, records] of attributeRecords) {
@@ -3373,8 +3840,12 @@
     if (IS_TOP_FRAME) createToolbar();
     initSelectionTranslator();
     installEscapeToClose();
-    startObserver();
     installSpaNavigationHook();
+    window.addEventListener('pagehide', cancelActiveRuns);
+    globalThis.NPT_OCR?.configure({
+      getTargetLanguage: () => (['vi', 'en'].includes(currentLanguage) ? currentLanguage : 'vi'),
+      onTranslateText: (text, targetLanguage) => TRANSLATION_CORE.translate(text, 'auto', targetLanguage, false),
+    });
 
     const savedLanguage = GM_getValue(`${CONFIG.storageKey}:${location.hostname}`, 'original');
     if (['vi', 'en'].includes(savedLanguage)) {
@@ -3640,6 +4111,16 @@
     // Popup gọi trực tiếp (chrome.tabs.sendMessage, không qua background).
     if (message?.type === 'summarizePageStart' && ['vi', 'en'].includes(message.language)) {
       if (IS_TOP_FRAME) summarizePage(message.language);
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (message?.type === 'startOcrMode') {
+      if (IS_TOP_FRAME) {
+        globalThis.NPT_OCR?.startOcrMode({
+          getTargetLanguage: () => (['vi', 'en'].includes(currentLanguage) ? currentLanguage : 'vi'),
+          onTranslateText: (text, targetLanguage) => TRANSLATION_CORE.translate(text, 'auto', targetLanguage, false),
+        });
+      }
       sendResponse({ ok: true });
       return false;
     }
@@ -4688,332 +5169,7 @@
     setTimeout(tick, HEARTBEAT_IDLE_MS);
   }
 
-  /* ------------------------------------------------------------------
-   * OCR màn hình (Quét chữ)
-   * ------------------------------------------------------------------ */
-  let ocrOverlay = null;
-
-  function closeOcrOverlay() {
-    if (ocrOverlay) {
-      ocrOverlay.remove();
-      ocrOverlay = null;
-    }
-  }
-
-  function cropImage(dataUrl, rect) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const vW = window.innerWidth || document.documentElement.clientWidth || 1;
-          const vH = window.innerHeight || document.documentElement.clientHeight || 1;
-          const scaleX = img.naturalWidth / vW;
-          const scaleY = img.naturalHeight / vH;
-
-          const cropX = Math.max(0, Math.round(rect.x * scaleX));
-          const cropY = Math.max(0, Math.round(rect.y * scaleY));
-          const cropW = Math.max(1, Math.min(img.naturalWidth - cropX, Math.round(rect.width * scaleX)));
-          const cropH = Math.max(1, Math.min(img.naturalHeight - cropY, Math.round(rect.height * scaleY)));
-
-          const canvas = document.createElement('canvas');
-          canvas.width = cropW;
-          canvas.height = cropH;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-          resolve(canvas.toDataURL('image/png'));
-        } catch (_) {
-          resolve(dataUrl);
-        }
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
-    });
-  }
-
-  function startOcrMode() {
-    if (window !== window.top) return;
-    if (ocrOverlay) closeOcrOverlay();
-
-    ocrOverlay = document.createElement('div');
-    Object.assign(ocrOverlay.style, {
-      position: 'fixed',
-      top: '0', left: '0', width: '100vw', height: '100vh',
-      zIndex: '2147483647',
-      cursor: 'crosshair',
-      background: 'rgba(0, 0, 0, 0.3)',
-      userSelect: 'none'
-    });
-
-    const selectionBox = document.createElement('div');
-    Object.assign(selectionBox.style, {
-      position: 'absolute',
-      border: '2px dashed #fff',
-      background: 'rgba(255, 255, 255, 0.1)',
-      display: 'none',
-      pointerEvents: 'none'
-    });
-    ocrOverlay.appendChild(selectionBox);
-
-    const header = document.createElement('div');
-    header.textContent = 'Kéo chuột để chọn vùng quét chữ (Nhấn Esc để thoát)';
-    Object.assign(header.style, {
-      position: 'absolute',
-      top: '20px', left: '50%',
-      transform: 'translateX(-50%)',
-      background: 'rgba(0, 0, 0, 0.7)',
-      color: '#fff',
-      padding: '8px 16px',
-      borderRadius: '4px',
-      fontSize: '14px',
-      fontFamily: 'sans-serif',
-      pointerEvents: 'none'
-    });
-    ocrOverlay.appendChild(header);
-
-    let isSelecting = false;
-    let startX = 0, startY = 0;
-
-    ocrOverlay.addEventListener('mousedown', (e) => {
-      isSelecting = true;
-      startX = e.clientX;
-      startY = e.clientY;
-      selectionBox.style.display = 'block';
-      selectionBox.style.left = startX + 'px';
-      selectionBox.style.top = startY + 'px';
-      selectionBox.style.width = '0px';
-      selectionBox.style.height = '0px';
-    });
-
-    ocrOverlay.addEventListener('mousemove', (e) => {
-      if (!isSelecting) return;
-      const currentX = e.clientX;
-      const currentY = e.clientY;
-      const x = Math.min(startX, currentX);
-      const y = Math.min(startY, currentY);
-      const w = Math.abs(currentX - startX);
-      const h = Math.abs(currentY - startY);
-
-      selectionBox.style.left = x + 'px';
-      selectionBox.style.top = y + 'px';
-      selectionBox.style.width = w + 'px';
-      selectionBox.style.height = h + 'px';
-    });
-
-    ocrOverlay.addEventListener('mouseup', async (e) => {
-      if (!isSelecting) return;
-      isSelecting = false;
-
-      const currentX = e.clientX;
-      const currentY = e.clientY;
-      const x = Math.min(startX, currentX);
-      const y = Math.min(startY, currentY);
-      const w = Math.abs(currentX - startX);
-      const h = Math.abs(currentY - startY);
-
-      if (w < 10 || h < 10) {
-        selectionBox.style.display = 'none';
-        return;
-      }
-
-      header.textContent = 'Đang trích xuất chữ...';
-
-      // Ẩn overlay đi xíu để background chụp màn hình ko dính overlay mờ
-      ocrOverlay.style.opacity = '0';
-
-      try {
-        // Đợi tí cho reflow
-        await new Promise(r => setTimeout(r, 120));
-
-        const captureResponse = await chrome.runtime.sendMessage({
-          type: 'ocrTakeScreenshot'
-        });
-
-        if (!captureResponse || !captureResponse.ok) {
-          throw new Error(captureResponse?.error || 'Lỗi chụp màn hình');
-        }
-
-        // Cắt ảnh đúng khung chữ người dùng đã chọn
-        const croppedDataUrl = await cropImage(captureResponse.dataUrl, { x, y, width: w, height: h });
-
-        const response = await chrome.runtime.sendMessage({
-          type: 'ocrProcessScreenshot',
-          payload: {
-            dataUrl: croppedDataUrl,
-            rect: { x, y, width: w, height: h }
-          }
-        });
-
-        if (!response || !response.ok) {
-          throw new Error(response?.error || 'Lỗi xử lý OCR');
-        }
-
-        const extractedText = (response.text || (response.lines || []).map(l => (typeof l === 'string' ? l : l.text)).join('\n') || '').trim();
-        showOcrResultPanel(extractedText || 'Không nhận diện được văn bản trong vùng chọn.');
-
-      } catch (err) {
-        ocrOverlay.style.opacity = '1';
-        alert('Lỗi OCR: ' + err.message);
-      } finally {
-        closeOcrOverlay();
-      }
-    });
-
-    document.body.appendChild(ocrOverlay);
-  }
-
-  let activeOcrPanel = null;
-
-  function showOcrResultPanel(text) {
-    if (activeOcrPanel) {
-      try { activeOcrPanel.remove(); } catch (_) {}
-      activeOcrPanel = null;
-    }
-
-    const panel = document.createElement('div');
-    activeOcrPanel = panel;
-    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
-
-    Object.assign(panel.style, {
-      position: 'fixed',
-      bottom: '20px',
-      right: '20px',
-      width: '300px',
-      maxHeight: '400px',
-      background: isDark ? '#1f2937' : '#ffffff',
-      color: isDark ? '#f3f4f6' : '#111827',
-      border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
-      borderRadius: '8px',
-      boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
-      zIndex: '2147483647',
-      display: 'flex',
-      flexDirection: 'column',
-      fontFamily: 'system-ui, sans-serif'
-    });
-
-    const header = document.createElement('div');
-    Object.assign(header.style, {
-      padding: '8px 12px',
-      borderBottom: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      fontWeight: '600',
-      fontSize: '14px',
-      cursor: 'move',
-      userSelect: 'none'
-    });
-    header.textContent = 'Kết quả OCR';
-
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = '✕';
-    Object.assign(closeBtn.style, {
-      background: 'none', border: 'none', cursor: 'pointer',
-      color: isDark ? '#9ca3af' : '#6b7280',
-      fontSize: '14px', padding: '0 4px'
-    });
-    closeBtn.onclick = () => panel.remove();
-    header.appendChild(closeBtn);
-
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    Object.assign(textarea.style, {
-      flex: '1',
-      minHeight: '150px',
-      margin: '12px',
-      padding: '8px',
-      background: isDark ? '#111827' : '#f9fafb',
-      color: 'inherit',
-      border: `1px solid ${isDark ? '#374151' : '#d1d5db'}`,
-      borderRadius: '4px',
-      resize: 'vertical',
-      fontFamily: 'monospace',
-      fontSize: '13px',
-      lineHeight: '1.5'
-    });
-
-    const footer = document.createElement('div');
-    Object.assign(footer.style, {
-      padding: '0 12px 12px 12px',
-      display: 'flex',
-      justifyContent: 'flex-end'
-    });
-
-    const copyBtn = document.createElement('button');
-    copyBtn.textContent = 'Copy tất cả';
-    Object.assign(copyBtn.style, {
-      background: '#4f46e5',
-      color: '#fff',
-      border: 'none',
-      padding: '6px 12px',
-      borderRadius: '4px',
-      cursor: 'pointer',
-      fontSize: '13px',
-      fontWeight: '500'
-    });
-    copyBtn.onclick = async () => {
-      await navigator.clipboard.writeText(textarea.value);
-      copyBtn.textContent = 'Đã copy!';
-      setTimeout(() => { copyBtn.textContent = 'Copy tất cả'; }, 2000);
-    };
-    footer.appendChild(copyBtn);
-
-    panel.appendChild(header);
-    panel.appendChild(textarea);
-    panel.appendChild(footer);
-
-    // Drag logic
-    let isDragging = false;
-    let dragX = 0, dragY = 0;
-
-    const onMouseMove = (e) => {
-      if (!isDragging) return;
-      panel.style.left = (e.clientX - dragX) + 'px';
-      panel.style.top = (e.clientY - dragY) + 'px';
-      panel.style.bottom = 'auto';
-      panel.style.right = 'auto';
-    };
-
-    const onMouseUp = () => {
-      isDragging = false;
-    };
-
-    header.addEventListener('mousedown', (e) => {
-      isDragging = true;
-      const rect = panel.getBoundingClientRect();
-      dragX = e.clientX - rect.left;
-      dragY = e.clientY - rect.top;
-    });
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-
-    // Cleanup listeners when panel is removed
-    const originalRemove = panel.remove.bind(panel);
-    panel.remove = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-      if (activeOcrPanel === panel) activeOcrPanel = null;
-      originalRemove();
-    };
-
-    document.body.appendChild(panel);
-  }
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      closeOcrOverlay();
-      if (activeOcrPanel) {
-        activeOcrPanel.remove();
-        activeOcrPanel = null;
-      }
-    }
-  });
-
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type === 'startOcrMode') {
-      startOcrMode();
-    }
-  });
+  // Giao diện OCR màn hình đã chuyển sang module cô lập ocr-panel.js (Closed Shadow DOM).
 
   function initInputTranslator() {
     if (!document.documentElement || document.getElementById('tm-native-en-helper-host')) return;

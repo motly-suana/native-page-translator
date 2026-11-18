@@ -1656,6 +1656,265 @@ async function run() {
     assert.equal(P.detectProviderForKey('abcdefghijklmnopqrstuvwxyz'), '');
   }
 
+  // 80. Gemini batch dùng responseMimeType: application/json (single/summary giữ plain text) + unwrap object
+  {
+    const batchReq = P.buildBatchRequest({
+      providerId: 'gemini', providerConfig: { model: 'gemini-2.5-flash' }, apiKey: 'g',
+      texts: ['xin chào'], targetLanguage: 'en',
+    });
+    assert.equal(JSON.parse(batchReq.body).generationConfig.responseMimeType, 'application/json');
+
+    const singleReq = P.buildRequest({
+      providerId: 'gemini', providerConfig: { model: 'gemini-2.5-flash' }, apiKey: 'g',
+      source: 'xin chào', context: '',
+    });
+    assert.equal(JSON.parse(singleReq.body).generationConfig.responseMimeType, undefined);
+
+    const summaryReq = P.buildSummaryRequest({
+      providerId: 'gemini', providerConfig: { model: 'gemini-2.5-flash' }, apiKey: 'g',
+      text: 'nội dung', targetLanguage: 'vi',
+    });
+    assert.equal(JSON.parse(summaryReq.body).generationConfig.responseMimeType, undefined);
+
+    const wrapped = P.classifyBatchResponse({
+      providerId: 'openai',
+      openaiFormat: 'chat',
+      status: 200,
+      expectedLength: 2,
+      bodyText: JSON.stringify({ choices: [{ message: { content: '{"translations":["hello","world"]}' } }] }),
+    });
+    assert.equal(wrapped.kind, 'ok');
+    assert.deepEqual(wrapped.translations, ['hello', 'world']);
+  }
+
+  // 81. Anthropic Claude native /v1/messages (single, batch, vision base64, QA, headers)
+  {
+    const singleReq = P.buildRequest({
+      providerId: 'anthropic',
+      providerConfig: { model: 'claude-haiku-4-5' },
+      apiKey: 'sk-ant-test-123',
+      source: 'xin chào',
+      context: '',
+      tone: 'natural',
+    });
+    assert.equal(singleReq.url, 'https://api.anthropic.com/v1/messages');
+    assert.equal(singleReq.headers['x-api-key'], 'sk-ant-test-123');
+    assert.equal(singleReq.headers['anthropic-version'], '2023-06-01');
+    const singleBody = JSON.parse(singleReq.body);
+    assert.equal(singleBody.model, 'claude-haiku-4-5');
+    assert.ok(typeof singleBody.system === 'string' && singleBody.system.length > 0);
+    assert.equal(singleBody.messages[0].role, 'user');
+
+    const okSingle = P.classifyResponse({
+      providerId: 'anthropic',
+      status: 200,
+      bodyText: JSON.stringify({ content: [{ type: 'text', text: 'Hello' }] }),
+    });
+    assert.deepEqual(okSingle, { kind: 'ok', text: 'Hello' });
+
+    const visionReq = P.buildVisionRequest({
+      providerId: 'anthropic',
+      providerConfig: {},
+      apiKey: 'sk-ant-test-123',
+      mimeType: 'image/png',
+      imageBase64: 'QUJD',
+      targetLanguage: 'vi',
+    });
+    const visionBody = JSON.parse(visionReq.body);
+    const imgBlock = visionBody.messages[0].content.find(p => p.type === 'image');
+    assert.equal(imgBlock.source.type, 'base64');
+    assert.equal(imgBlock.source.media_type, 'image/png');
+    assert.equal(imgBlock.source.data, 'QUJD');
+
+    const qaReq = P.buildQaRequest({
+      providerId: 'anthropic',
+      providerConfig: {},
+      apiKey: 'sk-ant-test-123',
+      text: '2+2=?',
+      imageBase64: 'QUJD',
+      mimeType: 'image/jpeg',
+    });
+    const qaContent = JSON.parse(qaReq.body).messages[0].content;
+    assert.equal(qaContent[0].type, 'image');
+    assert.equal(qaContent[1].type, 'text');
+  }
+
+  // 82. 12 Preset providers + detectPresetForKey + normalizeConfig giữ preset & routingStrategy
+  {
+    assert.equal(P.PRESET_ORDER.length, 12);
+    assert.equal(P.detectPresetForKey('sk-ant-api03-abcdef123456'), 'anthropic');
+    assert.equal(P.detectPresetForKey('gsk_1234567890abcdef'), 'groq');
+    assert.equal(P.detectPresetForKey('sk-or-v1-abcdef123456'), 'openrouter');
+    assert.equal(P.detectPresetForKey('csk-1234567890abcdef'), 'cerebras');
+    assert.equal(P.detectPresetForKey('xai-1234567890abcdef'), 'xai');
+    assert.equal(P.detectPresetForKey('pplx-1234567890abcdef'), 'perplexity');
+    assert.equal(P.detectPresetForKey('AIzaSyTestKey12345'), 'gemini');
+    assert.equal(P.detectPresetForKey('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:fx'), 'deepl');
+    assert.equal(P.detectPresetForKey('AbCdEfGhIjKlMnOpQrStUv=='), 'deploy');
+
+    const cfg = P.normalizeConfig({
+      preferred: 'groq',
+      routingStrategy: 'smart-stripe',
+      providers: {
+        groq: { enabled: true, keys: [{ key: 'gsk_1' }] },
+        anthropic: { enabled: true, keys: [{ key: 'sk-ant-1' }] },
+      },
+    });
+    assert.equal(cfg.routingStrategy, 'smart-stripe');
+    assert.equal(cfg.preferred, 'groq');
+    assert.ok(P.usableProviders(cfg).includes('groq'));
+    assert.ok(P.usableProviders(cfg).includes('anthropic'));
+    assert.ok(P.visionProviderIds(cfg).includes('anthropic'));
+  }
+
+  // 83. Per-key disabled toggle: activeKeysOf bỏ key tắt & giữ nguyên schema key đang bật
+  {
+    const cfg = P.normalizeConfig({
+      preferred: 'gemini',
+      providers: {
+        gemini: {
+          enabled: true,
+          keys: [
+            { key: 'AIzaKey1', label: 'A', disabled: true },
+            { key: 'AIzaKey2', label: 'B', disabled: false },
+          ],
+        },
+      },
+    });
+    assert.equal(cfg.providers.gemini.keys[0].disabled, true);
+    assert.equal('disabled' in cfg.providers.gemini.keys[1], false);
+    assert.equal(P.activeKeysOf(cfg.providers.gemini).length, 1);
+    assert.equal(P.activeKeysOf(cfg.providers.gemini)[0].key, 'AIzaKey2');
+
+    // Tất cả key bị tắt thì provider không usable nữa.
+    cfg.providers.gemini.keys[1].disabled = true;
+    assert.deepEqual(P.usableProviders(cfg), []);
+  }
+
+  // 84. Round-robin xoay con trỏ đều qua mọi key đang bật
+  {
+    const cfg = P.normalizeConfig({
+      preferred: 'openai',
+      routingStrategy: 'round-robin',
+      providers: {
+        openai: { enabled: true, format: 'chat', keys: [{ key: 'sk-1' }, { key: 'sk-2' }, { key: 'sk-3' }] },
+      },
+    });
+    const ks = P.createKeyState();
+    const used = [];
+    const fetchText = async (req) => {
+      used.push(String(req.headers?.Authorization || '').replace(/^Bearer\s+/i, ''));
+      return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) };
+    };
+    for (let i = 0; i < 6; i++) {
+      await P.translateWithRotation({
+        config: cfg,
+        source: 'xin chào',
+        context: '',
+        keyState: ks,
+        sleep: noSleep,
+        fetchText,
+      });
+    }
+    assert.deepEqual(used, ['sk-1', 'sk-2', 'sk-3', 'sk-1', 'sk-2', 'sk-3']);
+  }
+
+  // 85. Smart-stripe ưu tiên key nhanh hơn & né key đang errorStreak / inflight cao
+  {
+    const cfg = P.normalizeConfig({
+      preferred: 'openai',
+      routingStrategy: 'smart-stripe',
+      providers: {
+        openai: { enabled: true, format: 'chat', keys: [{ key: 'sk-slow' }, { key: 'sk-fast' }] },
+      },
+    });
+    const ks = P.createKeyState();
+    const now = Date.now();
+    P.recordKeyMetric(ks, P.cooldownKey('openai', 'sk-slow'), { ok: true, latencyMs: 1800, status: 'ok', now });
+    P.recordKeyMetric(ks, P.cooldownKey('openai', 'sk-fast'), { ok: true, latencyMs: 120, status: 'ok', now });
+
+    let picked = '';
+    const captureFetch = async (req) => {
+      picked = String(req.headers?.Authorization || '').replace(/^Bearer\s+/i, '');
+      return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) };
+    };
+    await P.translateWithRotation({
+      config: cfg,
+      source: 'xin chào',
+      context: '',
+      keyState: ks,
+      now: () => now,
+      sleep: noSleep,
+      fetchText: captureFetch,
+    });
+    assert.equal(picked, 'sk-fast');
+
+    // Khi sk-fast đang bận inflight nhiều -> smart-stripe chuyển sang sk-slow
+    ks.inflight.set(P.cooldownKey('openai', 'sk-fast'), 5);
+    await P.translateWithRotation({
+      config: cfg,
+      source: 'xin chào',
+      context: '',
+      keyState: ks,
+      now: () => now,
+      sleep: noSleep,
+      fetchText: captureFetch,
+    });
+    assert.equal(picked, 'sk-slow');
+  }
+
+  // 86. exportKeyHealthSnapshot / hydrateKeyState dùng key hash, không rò rỉ raw key
+  {
+    const cfg = P.normalizeConfig({
+      preferred: 'openai',
+      routingStrategy: 'smart-stripe',
+      providers: {
+        openai: { enabled: true, keys: [{ key: 'sk-super-secret-xyz' }] },
+      },
+    });
+    const ks1 = P.createKeyState();
+    const cd = P.cooldownKey('openai', 'sk-super-secret-xyz');
+    const now = Date.now();
+    ks1.cooldowns.set(cd, now + 60000);
+    P.recordKeyMetric(ks1, cd, { ok: true, latencyMs: 250, status: 'ok', now });
+
+    const snap = P.exportKeyHealthSnapshot(cfg, ks1, now);
+    assert.equal(JSON.stringify(snap).includes('sk-super-secret-xyz'), false, 'snapshot tuyệt đối không chứa key thô');
+
+    const ks2 = P.createKeyState();
+    P.hydrateKeyState(ks2, snap, cfg, now);
+    assert.equal(ks2.cooldowns.get(cd), now + 60000);
+    assert.equal(ks2.metrics.get(cd).emaLatencyMs, 250);
+  }
+
+  // 87. OpenAI Vision (/v1/responses -> /v1/chat/completions) không bỏ rơi imageBase64
+  {
+    const cfg = { supportsVision: true, url: 'https://api.openai.com/v1/responses', model: 'gpt-4.1-mini' };
+    const qaImg = P.buildQaRequest({
+      providerId: 'openai',
+      providerConfig: cfg,
+      apiKey: 'sk-vis',
+      text: 'Đọc ảnh này',
+      imageBase64: 'QUJD',
+      mimeType: 'image/png',
+    });
+    assert.equal(qaImg.url, 'https://api.openai.com/v1/chat/completions');
+    assert.equal(qaImg.openaiFormat, 'chat');
+    const qaBody = JSON.parse(qaImg.body);
+    assert.equal(qaBody.messages[1].content[1].image_url.url, 'data:image/png;base64,QUJD');
+
+    const vis = P.buildVisionRequest({
+      providerId: 'openai',
+      providerConfig: cfg,
+      apiKey: 'sk-vis',
+      mimeType: 'image/png',
+      imageBase64: 'QUJD',
+      targetLanguage: 'vi',
+    });
+    assert.equal(vis.url, 'https://api.openai.com/v1/chat/completions');
+    assert.equal(JSON.parse(vis.body).messages[1].content[1].type, 'image_url');
+  }
+
   console.log('Tất cả test providers.js đều PASS ✔');
 }
 

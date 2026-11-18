@@ -1,15 +1,25 @@
-importScripts('providers.js');
+importScripts('prompts.js', 'providers.js', 'translation-pipeline.js');
 
 const {
   CONFIG_STORAGE_KEY,
+  SYSTEM_PROMPT_OVERRIDE_KEY,
   PROVIDER_DEFS,
+  PRESET_ORDER,
+  ROUTING_STRATEGIES,
+  BUILTIN_ORIGINS: PROVIDER_BUILTIN_ORIGINS,
   normalizeConfig,
+  normalizeSystemPromptOverrides,
+  activeKeysOf,
+  providerIdsOf,
   usableProviders,
+  supportsVision,
   providerKind,
   providerLabelOf,
   maskKey,
   deeplUsageEndpoint,
   normalizePageOptions,
+  buildRequest,
+  classifyResponse,
   translateWithRotation,
   translateBatchWithRotation,
   summarizeWithRotation,
@@ -17,24 +27,62 @@ const {
   ocrVisionWithRotation,
   solveQuestionWithRotation,
   createKeyState,
+  cooldownKey,
+  keyHashId,
+  recordKeyMetric,
+  exportKeyHealthSnapshot,
+  hydrateKeyState,
 } = globalThis.NPT_PROVIDERS;
 
-const BUILTIN_ORIGINS = new Set([
-  'https://translate.googleapis.com',
-  'https://translate.google.com',
-  'https://api.mymemory.translated.net',
-  'https://api.openai.com',
-  'https://generativelanguage.googleapis.com',
-  'https://api-free.deepl.com',
-  'https://api.deepl.com',
-  'https://api-sf1-cdn.deploy.com',
-]);
+const BUILTIN_ORIGINS = new Set(PROVIDER_BUILTIN_ORIGINS);
 
 // Không seed key cứng trong mã nguồn (chuẩn Chrome Web Store).
 const DEFAULT_DEEPL_KEY = '';
 
-// Trạng thái cooldown/con trỏ xoay vòng key, sống trong bộ nhớ service worker.
+// Trạng thái cooldown/telemetry/con trỏ xoay vòng key, sống trong bộ nhớ service worker
+// và được lưu/khôi phục dạng hash qua chrome.storage.session để sống sót khi SW sleep.
+const KEY_HEALTH_SESSION_KEY = 'npt-key-health-v5';
 const keyState = createKeyState();
+let keyHealthLoadPromise = null;
+let keyHealthSaveTimer = null;
+let systemPromptOverridesCache = null;
+
+function scheduleKeyHealthSave() {
+  if (!chrome.storage?.session?.set) return;
+  if (keyHealthSaveTimer) return;
+  keyHealthSaveTimer = setTimeout(() => {
+    keyHealthSaveTimer = null;
+    if (!configCache) return;
+    const snapshot = exportKeyHealthSnapshot(configCache, keyState);
+    chrome.storage.session.set({ [KEY_HEALTH_SESSION_KEY]: snapshot }).catch(() => {});
+  }, 600);
+  keyHealthSaveTimer?.unref?.();
+}
+
+keyState.onChange = scheduleKeyHealthSave;
+
+async function ensureKeyHealthLoaded(config) {
+  if (!keyHealthLoadPromise) {
+    keyHealthLoadPromise = (async () => {
+      try {
+        const data = await chrome.storage?.session?.get?.([KEY_HEALTH_SESSION_KEY]);
+        if (data?.[KEY_HEALTH_SESSION_KEY]) {
+          hydrateKeyState(keyState, data[KEY_HEALTH_SESSION_KEY], config);
+        }
+      } catch (_) {
+        // Môi trường không có session storage — giữ telemetry trong bộ nhớ.
+      }
+    })();
+  }
+  await keyHealthLoadPromise;
+}
+
+async function ensureSystemOverrides() {
+  if (systemPromptOverridesCache) return systemPromptOverridesCache;
+  const values = await chrome.storage.local.get([SYSTEM_PROMPT_OVERRIDE_KEY]).catch(() => ({}));
+  systemPromptOverridesCache = normalizeSystemPromptOverrides(values?.[SYSTEM_PROMPT_OVERRIDE_KEY]);
+  return systemPromptOverridesCache;
+}
 
 // Registry các providerTranslate đang chạy: requestId -> AbortController (NPT-007).
 const inflightRequests = new Map();
@@ -96,6 +144,7 @@ async function ensureConfig() {
 
   const config = normalizeConfig({
     preferred: 'deepl',
+    routingStrategy: 'smart-stripe',
     providers: {
       deepl: {
         enabled: true,
@@ -244,12 +293,15 @@ async function providerFetchText(request, signal) {
 }
 
 async function nativeTranslate(payload) {
-  const config = await ensureConfig();
+  const [config, overrides] = await Promise.all([ensureConfig(), ensureSystemOverrides()]);
+  await ensureKeyHealthLoaded(config);
 
   const result = await translateWithRotation({
     config,
     source: payload?.source,
     context: String(payload?.context || '').trim(),
+    tone: String(payload?.tone || '').trim() || undefined,
+    systemOverride: String(payload?.systemOverride || overrides.native || '').trim(),
     keyState,
     fetchText: providerFetchText,
   });
@@ -274,7 +326,7 @@ async function nativeTranslate(payload) {
  * ------------------------------------------------------------------ */
 const TRANSLATION_CACHE_KEY = 'tm-translation-cache-v1';
 const TRANSLATION_CACHE_ENABLED_KEY = 'tm-translation-cache';
-const TRANSLATION_CACHE_MAX = 3000;
+const TRANSLATION_CACHE_MAX = 5000;
 const TRANSLATION_CACHE_FLUSH_MS = 5000;
 // Đủ nhiều entry mới thì ghi ngay, không chờ debounce — service worker có thể
 // bị dọn trước khi timer chạy, mất sạch phần vừa dịch.
@@ -408,12 +460,14 @@ async function summarizePage(payload) {
   if (!Number.isFinite(maxBullets)) maxBullets = 8;
   maxBullets = Math.min(15, Math.max(3, Math.round(maxBullets)));
 
-  const config = await ensureConfig();
+  const [config, overrides] = await Promise.all([ensureConfig(), ensureSystemOverrides()]);
+  await ensureKeyHealthLoaded(config);
   const result = await summarizeWithRotation({
     config,
     text: text.slice(0, MAX_SUMMARY_CHARS),
     targetLanguage,
     maxBullets,
+    systemOverride: overrides.summary,
     keyState,
     fetchText: providerFetchText,
   });
@@ -492,24 +546,64 @@ async function fetchPdf(payload) {
 }
 
 /* ------------------------------------------------------------------
- * Adaptive Concurrency Pool (tối đa 3 batch song song, tự động giảm về 2 khi gặp HTTP 429)
+ * Dynamic Multi-Key Concurrency Pool + Incognito-Safe Singleflight
+ * - DeepL: 6 luồng song song.
+ * - LLM (Gemini/OpenAI/Deploy): scale từ 4 đến 8 luồng theo tổng số key đang bật.
+ * - Khi gặp HTTP 429: tạm hạ xuống 2 luồng trong 30s rồi tự phục hồi.
  * ------------------------------------------------------------------ */
-let maxBatchConcurrency = 3;
+let rateLimitThrottledUntil = 0;
 let activeBatchRequests = 0;
 const batchQueue = [];
 let concurrencyAdaptTimer = null;
 
+// Singleflight map cho các chuỗi đang bay (CHỈ dùng khi useCache === true, tuyệt đối không cho incognito).
+const inflightTranslations = new Map();
+// Hủy sớm cho requestId bị cancel trước khi kịp lấy slot trong pool (requestId -> expiresAt).
+const cancelledRequestIds = new Map();
+
+function markRequestCancelled(requestId) {
+  const now = Date.now();
+  if (cancelledRequestIds.size > 64) {
+    for (const [id, exp] of cancelledRequestIds) {
+      if (exp <= now) cancelledRequestIds.delete(id);
+    }
+  }
+  cancelledRequestIds.set(requestId, now + 60000);
+}
+
+function consumeCancelledRequest(requestId) {
+  if (!requestId) return false;
+  const expiresAt = cancelledRequestIds.get(requestId);
+  if (expiresAt === undefined) return false;
+  cancelledRequestIds.delete(requestId);
+  return expiresAt > Date.now();
+}
+
+function effectiveMaxBatchConcurrency(config) {
+  if (rateLimitThrottledUntil > Date.now()) return 2;
+  const active = usableProviders(config);
+  if (!active.length) return 3;
+  if (providerKind(active[0]) === 'deepl') return 6;
+  const totalActiveKeys = active.reduce((sum, id) => {
+    const count = activeKeysOf(config?.providers?.[id]).length;
+    return sum + (count || 1);
+  }, 0);
+  const maxCap = config?.routingStrategy === 'smart-stripe' || totalActiveKeys >= 4 ? 12 : 8;
+  return Math.min(maxCap, Math.max(4, totalActiveKeys * 2));
+}
+
 function adaptConcurrencyOnRateLimit() {
-  maxBatchConcurrency = 2;
+  rateLimitThrottledUntil = Date.now() + 30000;
   clearTimeout(concurrencyAdaptTimer);
   concurrencyAdaptTimer = setTimeout(() => {
-    maxBatchConcurrency = 3;
-    processBatchQueue();
+    rateLimitThrottledUntil = 0;
+    processBatchQueue(configCache);
   }, 30000);
 }
 
-async function acquireBatchSlot() {
-  if (activeBatchRequests < maxBatchConcurrency) {
+async function acquireBatchSlot(config) {
+  const limit = effectiveMaxBatchConcurrency(config);
+  if (activeBatchRequests < limit) {
     activeBatchRequests++;
     return;
   }
@@ -518,17 +612,64 @@ async function acquireBatchSlot() {
   });
 }
 
-function releaseBatchSlot() {
+function releaseBatchSlot(config) {
   activeBatchRequests = Math.max(0, activeBatchRequests - 1);
-  processBatchQueue();
+  processBatchQueue(config);
 }
 
-function processBatchQueue() {
-  while (batchQueue.length > 0 && activeBatchRequests < maxBatchConcurrency) {
+function processBatchQueue(config) {
+  const limit = effectiveMaxBatchConcurrency(config);
+  while (batchQueue.length > 0 && activeBatchRequests < limit) {
     activeBatchRequests++;
     const next = batchQueue.shift();
     if (typeof next === 'function') next();
   }
+}
+
+const SPLITTABLE_BATCH_ERROR_RE = /không khớp số đoạn gửi|không parse được mảng bản dịch/i;
+
+async function translateBatchWithAutoSplit({ config, texts, sourceLanguage, targetLanguage, pageOptions, signal }) {
+  let lastMeta = { provider: '', providerLabel: '' };
+  const pipeline = globalThis.NPT_PIPELINE;
+
+  const callSingle = async (subTexts) => {
+    try {
+      const outcome = await translateBatchWithRotation({
+        config,
+        texts: subTexts,
+        sourceLanguage,
+        targetLanguage,
+        pageOptions,
+        keyState,
+        fetchText: (request) => providerFetchText(request, signal),
+      });
+      lastMeta = { provider: outcome.provider, providerLabel: outcome.providerLabel };
+      return outcome.translations;
+    } catch (error) {
+      if (!SPLITTABLE_BATCH_ERROR_RE.test(String(error?.message || error))) {
+        error.noSplit = true;
+      }
+      throw error;
+    }
+  };
+
+  if (pipeline?.translateWithSplitRecovery && texts.length >= 4) {
+    const translations = await pipeline.translateWithSplitRecovery(texts, callSingle, {
+      minSplitSize: 2,
+      signal,
+    });
+    return { translations, ...lastMeta };
+  }
+
+  return translateBatchWithRotation({
+    config,
+    texts,
+    sourceLanguage,
+    targetLanguage,
+    pageOptions,
+    keyState,
+    fetchText: (request) => providerFetchText(request, signal),
+  });
 }
 
 async function providerTranslate(payload, sender) {
@@ -550,60 +691,165 @@ async function providerTranslate(payload, sender) {
     throw new Error("targetLanguage chỉ hỗ trợ 'vi' hoặc 'en'");
   }
 
-  const config = await ensureConfig();
+  const [config, overrides] = await Promise.all([ensureConfig(), ensureSystemOverrides()]);
+  await ensureKeyHealthLoaded(config);
   await ensureTranslationCache();
 
-  // Văn phong dịch trang (v4.2): style/dialect/mode/grammar/proper-nouns.
+  // Văn phong dịch trang (v4.2+): style/dialect/mode/grammar/proper-nouns + systemOverride.
   // normalizePageOptions ép giá trị rác về default; DeepL tự bỏ qua ở tầng providers.
-  const pageOptions = normalizePageOptions(payload?.pageOptions);
+  const rawPageOptions = normalizePageOptions(payload?.pageOptions);
+  const pageOptions = (!rawPageOptions.systemOverride && overrides.batch)
+    ? { ...rawPageOptions, systemOverride: overrides.batch }
+    : rawPageOptions;
 
-  /* Lọc trước những đoạn đã dịch ở lần trước (tab khác, phiên trước, reload):
-   * chỉ phần chưa có mới đi tới provider. Trang tin/diễn đàn lặp lại rất nhiều
-   * chuỗi giống nhau nên tỉ lệ trúng thường rất cao. */
+  /* Lọc trước những đoạn đã dịch ở lần trước hoặc đang bay ở request khác
+   * (CHỈ khi useCache === true để đảm bảo tab ẩn danh luôn cô lập tuyệt đối). */
   const useCache = translationCacheEnabled && isCacheableSender(sender);
   const prefix = translationCachePrefix(config, payload?.sourceLanguage, targetLanguage, pageOptions);
   const translations = new Array(list.length);
-  const missIndexes = [];
-  const missTexts = [];
+  const waitEntries = [];
+  const uniqueMissTexts = [];
+  const uniqueMissKeys = [];
+  const localMissIndexByText = new Map();
+  const localBindings = [];
+  const deferredResolvers = [];
+
   for (let index = 0; index < list.length; index++) {
-    const hit = useCache ? translationCacheGet(prefix + hashText(list[index])) : undefined;
+    const rawText = list[index];
+    const cacheKey = useCache ? prefix + hashText(rawText) : '';
+    const hit = useCache ? translationCacheGet(cacheKey) : undefined;
     if (typeof hit === 'string') {
       translations[index] = hit;
-    } else {
-      missIndexes.push(index);
-      missTexts.push(list[index]);
+      continue;
     }
+
+    if (useCache && inflightTranslations.has(cacheKey)) {
+      waitEntries.push({ index, text: rawText, promise: inflightTranslations.get(cacheKey) });
+      continue;
+    }
+
+    let missIdx = localMissIndexByText.get(rawText);
+    if (missIdx === undefined) {
+      missIdx = uniqueMissTexts.length;
+      localMissIndexByText.set(rawText, missIdx);
+      uniqueMissTexts.push(rawText);
+      uniqueMissKeys.push(cacheKey);
+      if (useCache) {
+        let resolveFn;
+        let rejectFn;
+        const promise = new Promise((resolve, reject) => {
+          resolveFn = resolve;
+          rejectFn = reject;
+        });
+        promise.catch(() => {}); // tránh UnhandledPromiseRejection khi không có waiter
+        inflightTranslations.set(cacheKey, promise);
+        deferredResolvers.push({ cacheKey, resolveFn, rejectFn });
+      }
+    }
+    localBindings.push({ index, missIdx });
   }
 
-  if (!missTexts.length) {
+  if (!uniqueMissTexts.length && !waitEntries.length) {
     return { ok: true, translations, provider: 'cache', providerLabel: 'Cache', cached: list.length };
   }
 
-  // Chờ slot trong pool 3x adaptive concurrency
-  await acquireBatchSlot();
+  // Nếu mọi chuỗi miss đều đang được request khác dịch → chờ các promise đó hoàn tất.
+  if (!uniqueMissTexts.length) {
+    const failedWaits = [];
+    await Promise.all(waitEntries.map(async (entry) => {
+      try {
+        translations[entry.index] = await entry.promise;
+      } catch (_) {
+        failedWaits.push(entry);
+      }
+    }));
+    if (!failedWaits.length) {
+      return { ok: true, translations, provider: 'cache', providerLabel: 'Cache', cached: list.length };
+    }
+    // Leader của một số waiter bị hủy/lỗi → dịch lại đúng những mục chưa có kết quả.
+    const retryResult = await providerTranslate({
+      ...payload,
+      texts: failedWaits.map(item => item.text),
+    }, sender);
+    failedWaits.forEach((item, idx) => {
+      translations[item.index] = retryResult.translations[idx];
+    });
+    return {
+      ok: true,
+      translations,
+      provider: retryResult.provider,
+      providerLabel: retryResult.providerLabel,
+      cached: list.length - failedWaits.length,
+    };
+  }
+
+  const requestId = String(payload?.requestId || '');
+  if (consumeCancelledRequest(requestId)) {
+    for (const def of deferredResolvers) {
+      inflightTranslations.delete(def.cacheKey);
+      def.rejectFn(new Error('Translation aborted'));
+    }
+    throw new Error('Translation aborted');
+  }
+
+  // Chờ slot trong dynamic concurrency pool
+  await acquireBatchSlot(config);
+
+  if (consumeCancelledRequest(requestId)) {
+    releaseBatchSlot(config);
+    for (const def of deferredResolvers) {
+      inflightTranslations.delete(def.cacheKey);
+      def.rejectFn(new Error('Translation aborted'));
+    }
+    throw new Error('Translation aborted');
+  }
 
   // Đăng ký AbortController theo requestId: content gửi 'cancelProviderTranslate'
-  // khi timeout phía nó hết hạn → request trả phí không chạy tiếp ngầm (NPT-007).
-  const requestId = String(payload?.requestId || '');
+  // khi timeout/hủy → request trả phí không chạy tiếp ngầm (NPT-007).
   const controller = new AbortController();
   if (requestId) inflightRequests.set(requestId, controller);
 
   try {
-    const result = await translateBatchWithRotation({
+    const result = await translateBatchWithAutoSplit({
       config,
-      texts: missTexts,
+      texts: uniqueMissTexts,
       sourceLanguage: payload?.sourceLanguage,
       targetLanguage,
       pageOptions,
-      keyState,
-      fetchText: (request) => providerFetchText(request, controller.signal),
+      signal: controller.signal,
     });
 
-    for (let index = 0; index < missIndexes.length; index++) {
-      const translated = result.translations[index];
-      translations[missIndexes[index]] = translated;
+    for (let missIdx = 0; missIdx < uniqueMissTexts.length; missIdx++) {
+      const translated = result.translations[missIdx];
       if (useCache && typeof translated === 'string' && translated) {
-        translationCacheSet(prefix + hashText(missTexts[index]), translated);
+        translationCacheSet(uniqueMissKeys[missIdx], translated);
+      }
+      if (deferredResolvers[missIdx]) {
+        deferredResolvers[missIdx].resolveFn(translated);
+      }
+    }
+
+    for (const binding of localBindings) {
+      translations[binding.index] = result.translations[binding.missIdx];
+    }
+
+    if (waitEntries.length) {
+      const failedWaits = [];
+      await Promise.all(waitEntries.map(async (entry) => {
+        try {
+          translations[entry.index] = await entry.promise;
+        } catch (_) {
+          failedWaits.push(entry);
+        }
+      }));
+      if (failedWaits.length) {
+        const retryResult = await providerTranslate({
+          ...payload,
+          texts: failedWaits.map(item => item.text),
+        }, sender);
+        failedWaits.forEach((item, idx) => {
+          translations[item.index] = retryResult.translations[idx];
+        });
       }
     }
 
@@ -612,32 +858,60 @@ async function providerTranslate(payload, sender) {
       translations,
       provider: result.provider,
       providerLabel: result.providerLabel,
-      cached: list.length - missTexts.length,
+      cached: list.length - localBindings.length - waitEntries.length,
     };
   } catch (error) {
+    for (const def of deferredResolvers) {
+      def.rejectFn(error);
+    }
     if (String(error?.message || error).includes('429')) {
       adaptConcurrencyOnRateLimit();
     }
     throw error;
   } finally {
+    for (const def of deferredResolvers) {
+      inflightTranslations.delete(def.cacheKey);
+    }
     if (requestId) inflightRequests.delete(requestId);
-    releaseBatchSlot();
+    releaseBatchSlot(config);
   }
 }
 
 async function providerStatus() {
   const config = await ensureConfig();
+  await ensureKeyHealthLoaded(config);
   const active = usableProviders(config);
+  const primaryKind = active.length ? providerKind(active[0]) : '';
+  const now = Date.now();
+  let totalActiveKeys = 0;
+  let totalHealthyKeys = 0;
+  let totalCoolingDownKeys = 0;
+  for (const id of active) {
+    const enabledKeys = activeKeysOf(config?.providers?.[id]);
+    totalActiveKeys += enabledKeys.length;
+    for (const entry of enabledKeys) {
+      const until = keyState.cooldowns.get(cooldownKey(id, entry.key)) || 0;
+      if (until > now) totalCoolingDownKeys++;
+      else totalHealthyKeys++;
+    }
+  }
   return {
     ok: true,
     configured: active.length > 0,
     preferred: config.preferred,
+    routingStrategy: config.routingStrategy,
+    primaryKind,
+    totalActiveKeys,
+    totalHealthyKeys,
+    totalCoolingDownKeys,
+    presetIds: PRESET_ORDER,
     providers: Object.fromEntries(
       Object.entries(config.providers).map(([id, provider]) => [
         id,
         {
           enabled: Boolean(provider.enabled),
           keyCount: provider.keys.length,
+          activeKeyCount: activeKeysOf(provider).length,
           label: providerLabelOf(id, provider),
         },
       ]),
@@ -655,6 +929,7 @@ async function deeplUsage() {
   const keys = config.providers.deepl?.keys || [];
   const usages = await Promise.all(keys.map(async (entry) => {
     const keyMasked = maskKey(entry.key);
+    const disabled = Boolean(entry.disabled);
     const response = await rawFetch({
       method: 'GET',
       url: deeplUsageEndpoint(entry.key),
@@ -662,22 +937,291 @@ async function deeplUsage() {
       timeout: 15000,
     });
     if (!response.ok || response.status < 200 || response.status >= 300) {
-      return { keyMasked, error: `HTTP ${response.status || 0}` };
+      return { keyMasked, disabled, error: `HTTP ${response.status || 0}` };
     }
     let data;
     try {
       data = JSON.parse(response.responseText || '{}');
     } catch (_) {
-      return { keyMasked, error: 'Phản hồi không phải JSON' };
+      return { keyMasked, disabled, error: 'Phản hồi không phải JSON' };
     }
     return {
       keyMasked,
+      disabled,
       count: Number(data.character_count) || 0,
       limit: Number(data.character_limit) || 0,
       free: /:fx\s*$/i.test(entry.key),
     };
   }));
   return { ok: true, usages };
+}
+
+async function getKeyPoolHealth() {
+  const config = await ensureConfig();
+  await ensureKeyHealthLoaded(config);
+  await ensureTranslationCache();
+  const now = Date.now();
+  const activeSet = new Set(usableProviders(config));
+  let totalKeys = 0;
+  let activeKeys = 0;
+  let disabledKeys = 0;
+  let healthyKeys = 0;
+  let coolingDownKeys = 0;
+  let totalSuccess = 0;
+  let totalError = 0;
+  let latencySum = 0;
+  let latencyCount = 0;
+
+  const providers = providerIdsOf(config).map((id) => {
+    const providerConfig = config.providers[id];
+    const keys = (providerConfig?.keys || []).map((entry, idx) => {
+      const cdKey = cooldownKey(id, entry.key);
+      const metric = keyState.metrics.get(cdKey) || {
+        emaLatencyMs: 0,
+        lastLatencyMs: 0,
+        successCount: 0,
+        errorCount: 0,
+        errorStreak: 0,
+        lastStatus: '',
+        lastUsedAt: 0,
+      };
+      const cooldownUntil = keyState.cooldowns.get(cdKey) || 0;
+      const coolingDown = cooldownUntil > now;
+      const disabled = Boolean(entry.disabled);
+      totalKeys++;
+      if (disabled) disabledKeys++;
+      else activeKeys++;
+      if (!disabled && providerConfig.enabled) {
+        if (coolingDown) coolingDownKeys++;
+        else healthyKeys++;
+      }
+      totalSuccess += Number(metric.successCount) || 0;
+      totalError += Number(metric.errorCount) || 0;
+      if (metric.emaLatencyMs > 0) {
+        latencySum += metric.emaLatencyMs;
+        latencyCount++;
+      }
+      return {
+        index: idx,
+        hashId: keyHashId(id, entry.key),
+        label: entry.label || `Key ${idx + 1}`,
+        keyMasked: maskKey(entry.key),
+        disabled,
+        coolingDown,
+        cooldownRemainingMs: coolingDown ? cooldownUntil - now : 0,
+        inflight: keyState.inflight.get(cdKey) || 0,
+        emaLatencyMs: metric.emaLatencyMs || 0,
+        lastLatencyMs: metric.lastLatencyMs || 0,
+        successCount: metric.successCount || 0,
+        errorCount: metric.errorCount || 0,
+        errorStreak: metric.errorStreak || 0,
+        lastStatus: metric.lastStatus || '',
+        lastUsedAt: metric.lastUsedAt || 0,
+      };
+    });
+    return {
+      id,
+      label: providerLabelOf(id, providerConfig),
+      kind: providerKind(id),
+      enabled: Boolean(providerConfig.enabled),
+      usable: activeSet.has(id),
+      model: providerConfig.model || '',
+      supportsVision: supportsVision(id, providerConfig),
+      keys,
+    };
+  });
+
+  return {
+    ok: true,
+    routingStrategy: config.routingStrategy,
+    preferred: config.preferred,
+    cacheEntries: translationCache.size,
+    cacheEnabled: translationCacheEnabled,
+    summary: {
+      totalKeys,
+      activeKeys,
+      disabledKeys,
+      healthyKeys,
+      coolingDownKeys,
+      totalSuccess,
+      totalError,
+      avgLatencyMs: latencyCount ? Math.round(latencySum / latencyCount) : 0,
+    },
+    providers,
+  };
+}
+
+async function pingSingleKey({ id, providerConfig, entry, idx }) {
+  const keyMasked = maskKey(entry.key);
+  const cdKey = cooldownKey(id, entry.key);
+  const kind = providerKind(id);
+  const label = providerLabelOf(id, providerConfig);
+
+  let targetUrl = '';
+  let request = null;
+  if (kind === 'deepl') {
+    targetUrl = deeplUsageEndpoint(entry.key);
+  } else {
+    try {
+      request = buildRequest({
+        providerId: id,
+        providerConfig,
+        apiKey: entry.key,
+        source: 'Hi',
+        context: 'Health check',
+        tone: 'natural',
+        systemOverride: 'Reply with OK only.',
+      });
+      targetUrl = request.url;
+    } catch (error) {
+      return {
+        providerId: id,
+        index: idx,
+        keyMasked,
+        ok: false,
+        latencyMs: 0,
+        status: 'INVALID_REQUEST',
+        error: error?.message || String(error),
+      };
+    }
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(targetUrl);
+  } catch (_) {
+    return { providerId: id, index: idx, keyMasked, ok: false, latencyMs: 0, status: 'INVALID_URL', error: 'Endpoint URL không hợp lệ' };
+  }
+
+  if (!(await isRemoteAllowed(parsedUrl))) {
+    return {
+      providerId: id,
+      index: idx,
+      keyMasked,
+      ok: false,
+      latencyMs: 0,
+      status: 'NO_PERMISSION',
+      error: `Chưa cấp quyền truy cập ${parsedUrl.origin}`,
+    };
+  }
+
+  const startedAt = Date.now();
+  let ok = false;
+  let status = 'error';
+  let error = '';
+  let cooldownMs = 0;
+
+  if (kind === 'deepl') {
+    const response = await rawFetch({
+      method: 'GET',
+      url: targetUrl,
+      headers: { Authorization: `DeepL-Auth-Key ${entry.key}` },
+      timeout: 15000,
+    });
+    if (response.ok && response.status >= 200 && response.status < 300) {
+      try {
+        JSON.parse(response.responseText || '{}');
+        ok = true;
+        status = 'ok';
+      } catch (_) {
+        status = 'INVALID_JSON';
+        error = 'Phản hồi không phải JSON';
+      }
+    } else {
+      status = `HTTP ${response.status || 0}`;
+      error = response.networkError || `DeepL HTTP ${response.status || 0}`;
+      if (response.status === 401 || response.status === 403) cooldownMs = 30 * 60 * 1000;
+      else if (response.status === 456) cooldownMs = 6 * 60 * 60 * 1000;
+      else if (response.status === 429) cooldownMs = 2 * 60 * 1000;
+    }
+  } else {
+    const resp = await providerFetchText({ ...request, timeout: 20000 });
+    if (resp.networkError) {
+      status = 'NETWORK_ERROR';
+      error = resp.networkError;
+    } else {
+      const verdict = classifyResponse({
+        providerId: id,
+        providerLabel: label,
+        openaiFormat: providerConfig.format,
+        status: resp.status,
+        bodyText: resp.bodyText,
+        retryAfterMs: resp.retryAfterMs,
+      });
+      if (verdict.kind === 'ok') {
+        ok = true;
+        status = 'ok';
+      } else {
+        status = verdict.kind === 'keyFailed' ? `HTTP ${resp.status}` : (verdict.kind || `HTTP ${resp.status}`);
+        error = verdict.message || `HTTP ${resp.status}`;
+        if (verdict.cooldownMs > 0) cooldownMs = verdict.cooldownMs;
+      }
+    }
+  }
+
+  const latencyMs = Math.max(1, Date.now() - startedAt);
+  if (ok) keyState.cooldowns.delete(cdKey);
+  else if (cooldownMs > 0) keyState.cooldowns.set(cdKey, Date.now() + cooldownMs);
+
+  recordKeyMetric(keyState, cdKey, {
+    ok,
+    latencyMs,
+    status: ok ? 'ok' : (error || status),
+    now: Date.now(),
+  });
+  scheduleKeyHealthSave();
+
+  return { providerId: id, index: idx, keyMasked, ok, latencyMs, status, error };
+}
+
+async function pingProviderKeys(payload) {
+  const config = await ensureConfig();
+  await ensureKeyHealthLoaded(config);
+
+  const requestedId = payload?.providerId ? String(payload.providerId) : '';
+  const hasExplicitIndex = Number.isInteger(payload?.keyIndex);
+  const targets = [];
+
+  const candidateIds = requestedId
+    ? (config.providers[requestedId] ? [requestedId] : [])
+    : providerIdsOf(config).filter(id => config.providers[id]?.enabled);
+
+  for (const id of candidateIds) {
+    const providerConfig = config.providers[id];
+    const keys = providerConfig?.keys || [];
+    keys.forEach((entry, idx) => {
+      if (hasExplicitIndex && idx !== payload.keyIndex) return;
+      if (entry.disabled && !(requestedId && hasExplicitIndex)) return;
+      targets.push({ id, providerConfig, entry, idx });
+    });
+  }
+
+  const results = new Array(targets.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < targets.length) {
+      const i = cursor++;
+      results[i] = await pingSingleKey(targets[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, Math.max(1, targets.length)) }, worker));
+
+  return { ok: true, results: targets.length ? results : [] };
+}
+
+async function quickSwitchEngine(payload) {
+  const config = await ensureConfig();
+  const nextRaw = JSON.parse(JSON.stringify(config));
+  if (payload?.preferred && nextRaw.providers?.[payload.preferred]) {
+    nextRaw.preferred = payload.preferred;
+  }
+  if (payload?.routingStrategy && ROUTING_STRATEGIES.includes(payload.routingStrategy)) {
+    nextRaw.routingStrategy = payload.routingStrategy;
+  }
+  const nextConfig = normalizeConfig(nextRaw);
+  await chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: nextConfig });
+  configCache = nextConfig;
+  return providerStatus();
 }
 
 async function broadcastToFrames(tabId, message) {
@@ -829,12 +1373,14 @@ async function handleImageTranslate(info, tab) {
     const stored = String(values[IMAGE_TARGET_KEY] || '').toLowerCase();
     const targetLanguage = ['vi', 'en'].includes(stored) ? stored : 'vi';
 
-    const config = await ensureConfig();
+    const [config, overrides] = await Promise.all([ensureConfig(), ensureSystemOverrides()]);
+    await ensureKeyHealthLoaded(config);
     const result = await translateVisionWithRotation({
       config,
       mimeType,
       imageBase64,
       targetLanguage,
+      systemOverride: overrides.vision,
       keyState,
       fetchText: providerFetchText,
     });
@@ -843,7 +1389,7 @@ async function handleImageTranslate(info, tab) {
   } catch (error) {
     let friendly = error?.message || String(error);
     if (friendly.includes('IMAGE_NEEDS_VISION') || friendly.includes('IMAGE_NEEDS_GEMINI')) {
-      friendly = 'Dịch ảnh cần API key đọc được ảnh (Gemini hoặc Deploy.com — bật trong Cài đặt)';
+      friendly = 'Dịch ảnh cần API key đọc được ảnh (Gemini, Claude, OpenRouter hoặc Deploy.com — bật trong Cài đặt)';
     }
     await send({ type: 'imageTranslateResult', srcUrl, ok: false, error: friendly });
   }
@@ -899,11 +1445,13 @@ async function handleOcrProcessScreenshot(payload, sender) {
     const mimeType = 'image/png';
     const imageBase64 = String(payload?.dataUrl || '').replace(/^data:image\/\w+;base64,/, '');
 
-    const config = await ensureConfig();
+    const [config, overrides] = await Promise.all([ensureConfig(), ensureSystemOverrides()]);
+    await ensureKeyHealthLoaded(config);
     const result = await ocrVisionWithRotation({
       config,
       mimeType,
       imageBase64,
+      systemOverride: overrides.ocr,
       keyState,
       fetchText: providerFetchText,
     });
@@ -912,7 +1460,7 @@ async function handleOcrProcessScreenshot(payload, sender) {
   } catch (error) {
     let friendly = error?.message || String(error);
     if (friendly.includes('IMAGE_NEEDS_VISION') || friendly.includes('IMAGE_NEEDS_GEMINI')) {
-      friendly = 'Quét chữ cần API key đọc được ảnh (Gemini hoặc Deploy.com — bật trong Cài đặt)';
+      friendly = 'Quét chữ cần API key đọc được ảnh (Gemini, Claude, OpenRouter hoặc Deploy.com — bật trong Cài đặt)';
     }
     return { ok: false, error: friendly };
   }
@@ -925,7 +1473,8 @@ async function handleQaSolveQuestion(payload, sender) {
     const imageBase64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
     const mimeMatch = dataUrl.match(/^data:(image\/\w+);base64,/);
     const mimeType = mimeMatch ? mimeMatch[1] : (payload?.mimeType || 'image/jpeg');
-    const config = await ensureConfig();
+    const [config, overrides] = await Promise.all([ensureConfig(), ensureSystemOverrides()]);
+    await ensureKeyHealthLoaded(config);
     const extendedThinking = payload?.extendedThinking !== undefined
       ? Boolean(payload.extendedThinking)
       : Boolean(config?.providers?.gemini?.extendedThinking);
@@ -942,6 +1491,7 @@ async function handleQaSolveQuestion(payload, sender) {
       mimeType,
       extendedThinking,
       thinkingLevel,
+      systemOverride: overrides.qa,
       fetchText: providerFetchText,
       keyState,
     });
@@ -955,11 +1505,11 @@ async function handleQaSolveQuestion(payload, sender) {
   } catch (error) {
     let friendly = error?.message || String(error);
     if (friendly.includes('IMAGE_NEEDS_VISION') || friendly.includes('IMAGE_NEEDS_GEMINI')) {
-      friendly = 'Giải câu hỏi bằng ảnh cần bật API key đọc được ảnh (Gemini hoặc Deploy.com) trong Cài đặt';
+      friendly = 'Giải câu hỏi bằng ảnh cần bật API key đọc được ảnh (Gemini, Claude, OpenRouter hoặc Deploy.com) trong Cài đặt';
     } else if (friendly.includes('QA_REQUIRES_LLM')) {
-      friendly = 'Cần cài đặt API key (Gemini hoặc OpenAI) trong Cài đặt để giải câu hỏi';
+      friendly = 'Cần cài đặt API key LLM (Gemini, Claude, OpenAI hoặc Preset) trong Cài đặt để giải câu hỏi';
     } else if (/429|giới hạn tốc độ|rate limit|resource_exhausted/i.test(friendly)) {
-      friendly = '⚠️ API Key tạm thời chạm giới hạn tốc độ (Rate Limit 429). Bạn hãy đợi vài giây rồi thử lại, hoặc thêm 1-2 API key phụ (Gemini/Deploy) trong Cài đặt để tự động xoay tua không bị gián đoạn.';
+      friendly = '⚠️ API Key tạm thời chạm giới hạn tốc độ (Rate Limit 429). Bạn hãy đợi vài giây rồi thử lại, hoặc thêm 1-2 API key phụ (Gemini/Claude/Deploy) trong Cài đặt để tự động xoay tua không bị gián đoạn.';
     }
     return { ok: false, error: friendly };
   }
@@ -996,7 +1546,7 @@ chrome.commands.onCommand.addListener(async (command) => {
       try {
         await chrome.scripting.executeScript({
           target: { tabId: tab.id },
-          files: ['icons.js', 'fancy-text.js', 'glossary.js', 'doc-detect.js', 'tts.js', 'content.js', 'qa-solver.js'],
+          files: ['icons.js', 'fancy-text.js', 'glossary.js', 'doc-detect.js', 'tts.js', 'translation-pipeline.js', 'ocr-panel.js', 'content.js', 'qa-solver.js'],
         });
         await chrome.tabs.sendMessage(tab.id, { type: 'startOcrMode' });
       } catch (_) {}
@@ -1053,8 +1603,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
 
-  // Options/popup vừa lưu key hoặc đổi provider → bỏ config đang nhớ.
+  // Options/popup vừa lưu key, đổi provider hoặc đổi Prompt Studio → bỏ cache đang nhớ.
   if (Object.hasOwn(changes, CONFIG_STORAGE_KEY)) configCache = null;
+  if (Object.hasOwn(changes, SYSTEM_PROMPT_OVERRIDE_KEY)) systemPromptOverridesCache = null;
 
   // Tắt cache trong Cài đặt → dừng đọc/ghi ngay và xoá luôn phần đã lưu.
   const cacheToggle = changes[TRANSLATION_CACHE_ENABLED_KEY];
@@ -1137,10 +1688,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // Content timeout → hủy request trả phí đang chạy ngầm (NPT-007).
+  // Content timeout/hủy phiên dịch → hủy các request trả phí đang chạy ngầm (NPT-007).
   if (message?.type === 'cancelProviderTranslate') {
-    const requestId = String(message.requestId || '');
-    inflightRequests.get(requestId)?.abort();
+    const ids = Array.isArray(message.requestIds)
+      ? message.requestIds
+      : (message.requestId ? [message.requestId] : []);
+    for (const rawId of ids) {
+      const requestId = String(rawId || '');
+      if (!requestId) continue;
+      const inflight = inflightRequests.get(requestId);
+      if (inflight) {
+        inflight.abort();
+      } else {
+        markRequestCancelled(requestId);
+      }
+    }
     sendResponse({ ok: true });
     return true;
   }
@@ -1181,6 +1743,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     deeplUsage().then(sendResponse).catch(error => {
+      sendResponse({ ok: false, error: sanitizeProviderError(error) });
+    });
+    return true;
+  }
+
+  if (message?.type === 'getKeyPoolHealth') {
+    if (!isExtensionPageSender(sender)) {
+      sendResponse({ ok: false, error: 'Chỉ trang extension mới dùng lệnh này' });
+      return false;
+    }
+    getKeyPoolHealth().then(sendResponse).catch(error => {
+      sendResponse({ ok: false, error: sanitizeProviderError(error) });
+    });
+    return true;
+  }
+
+  if (message?.type === 'pingProviderKeys') {
+    if (!isExtensionPageSender(sender)) {
+      sendResponse({ ok: false, error: 'Chỉ trang extension mới dùng lệnh này' });
+      return false;
+    }
+    pingProviderKeys(message.payload).then(sendResponse).catch(error => {
+      sendResponse({ ok: false, error: sanitizeProviderError(error) });
+    });
+    return true;
+  }
+
+  if (message?.type === 'quickSwitchEngine') {
+    if (!isExtensionPageSender(sender)) {
+      sendResponse({ ok: false, error: 'Chỉ trang extension mới dùng lệnh này' });
+      return false;
+    }
+    quickSwitchEngine(message.payload).then(sendResponse).catch(error => {
       sendResponse({ ok: false, error: sanitizeProviderError(error) });
     });
     return true;

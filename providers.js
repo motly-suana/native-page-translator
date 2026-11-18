@@ -8,8 +8,56 @@
 (function attachProviders(global) {
   'use strict';
 
+  // Module sinh & chuẩn hóa System Prompt tách riêng tại prompts.js (nạp trước providers.js).
+  const PROMPTS = global.NPT_PROMPTS || (typeof require === 'function' ? require('./prompts.js') : null);
+  if (!PROMPTS) {
+    throw new Error('NPT_PROMPTS (prompts.js) phải được nạp trước providers.js');
+  }
+
+  const {
+    TONES,
+    SYSTEM_PROMPT_OVERRIDE_KEY,
+    PROMPT_STUDIO_TASKS,
+    CASUAL_REWRITES,
+    PAGE_STYLES,
+    PAGE_DIALECTS,
+    PAGE_MODE_LITERAL_INSTRUCTION,
+    PAGE_GRAMMAR_FIX_INSTRUCTION,
+    PAGE_KEEP_PROPER_NOUNS_INSTRUCTION,
+    DEFAULT_PAGE_OPTIONS,
+    SUMMARY_TARGET,
+    VISION_TARGET,
+    buildNativeInstructions,
+    buildPrompt,
+    humanizeCasual,
+    normalizePageContext,
+    normalizePageOptions,
+    normalizeSystemPromptOverrides,
+    buildBatchInstructions,
+    clampSummaryBullets,
+    buildSummaryInstructions,
+    buildQaInstructions,
+    buildVisionInstructions,
+    buildOcrVisionInstructions,
+  } = PROMPTS;
+
   const CONFIG_STORAGE_KEY = 'tm-multi-provider-config';
   const PROVIDER_ORDER = ['deepl', 'gemini', 'openai', 'deploy'];
+  const PRESET_ORDER = [
+    'anthropic',
+    'groq',
+    'openrouter',
+    'cerebras',
+    'deepseek',
+    'xai',
+    'mistral',
+    'together',
+    'fireworks',
+    'perplexity',
+    'siliconflow',
+    'cohere',
+  ];
+  const ROUTING_STRATEGIES = ['failover', 'round-robin', 'smart-stripe'];
 
   const PROVIDER_DEFS = {
     deepl: {
@@ -38,6 +86,7 @@
         'gemini-3.5-flash-lite',
         'gemini-3.5-flash',
       ],
+      supportsVision: true,
       site: 'https://aistudio.google.com/apikey',
     },
     openai: {
@@ -48,6 +97,7 @@
       needsUrl: true,
       defaultModel: 'gpt-4o-mini',
       defaultUrl: 'https://api.openai.com/v1/chat/completions',
+      suggestedModels: ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4.1-nano'],
     },
     deploy: {
       id: 'deploy',
@@ -60,9 +110,204 @@
         'deepseek-ai/deepseek-v4.1-flash-1017',
         'zai-org/glm-5.3-flash',
       ],
+      supportsVision: true,
       site: 'https://deploy.com',
     },
+    anthropic: {
+      id: 'anthropic',
+      label: 'Anthropic Claude',
+      keyPlaceholder: 'Key Claude bắt đầu bằng sk-ant-...',
+      needsModel: true,
+      needsUrl: false,
+      defaultModel: 'claude-haiku-4-5',
+      suggestedModels: [
+        'claude-sonnet-4-5',
+        'claude-haiku-4-5',
+        'claude-3-7-sonnet-latest',
+      ],
+      supportsVision: true,
+      site: 'https://console.anthropic.com/settings/keys',
+    },
   };
+
+  /* ------------------------------------------------------------------
+   * Danh mục 12 nhà cung cấp Preset 1-Click (v5.0).
+   * Mỗi preset có URL, model gợi ý và prefix key chuẩn — người dùng chỉ cần
+   * dán key (hoặc dán lẫn nhiều hãng vào ô đa năng) là tự kích hoạt ngay.
+   * ------------------------------------------------------------------ */
+  const PROVIDER_PRESETS = {
+    anthropic: {
+      id: 'anthropic',
+      kind: 'anthropic',
+      label: 'Anthropic Claude',
+      keyPlaceholder: 'Key Claude bắt đầu bằng sk-ant-...',
+      needsModel: true,
+      needsUrl: false,
+      defaultUrl: 'https://api.anthropic.com/v1/messages',
+      defaultModel: 'claude-haiku-4-5',
+      suggestedModels: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-3-7-sonnet-latest'],
+      supportsVision: true,
+      badgeTag: 'Vision + Lý luận',
+      site: 'https://console.anthropic.com/settings/keys',
+    },
+    groq: {
+      id: 'groq',
+      kind: 'openai',
+      label: 'Groq Cloud',
+      keyPlaceholder: 'Key Groq bắt đầu bằng gsk_...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.groq.com/openai/v1/chat/completions',
+      defaultModel: 'llama-3.3-70b-versatile',
+      suggestedModels: ['llama-3.3-70b-versatile', 'meta-llama/llama-4-scout-17b-16e-instruct', 'qwen/qwen3-32b'],
+      badgeTag: 'Siêu tốc',
+      site: 'https://console.groq.com/keys',
+    },
+    openrouter: {
+      id: 'openrouter',
+      kind: 'openai',
+      label: 'OpenRouter',
+      keyPlaceholder: 'Key OpenRouter bắt đầu bằng sk-or-v1-...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://openrouter.ai/api/v1/chat/completions',
+      defaultModel: 'google/gemini-2.5-flash',
+      suggestedModels: ['google/gemini-2.5-flash', 'deepseek/deepseek-chat-v3-0324', 'anthropic/claude-3.7-sonnet', 'openai/gpt-4.1-mini'],
+      supportsVision: true,
+      badgeTag: 'Đa model + Vision',
+      site: 'https://openrouter.ai/keys',
+    },
+    cerebras: {
+      id: 'cerebras',
+      kind: 'openai',
+      label: 'Cerebras Inference',
+      keyPlaceholder: 'Key Cerebras bắt đầu bằng csk-...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.cerebras.ai/v1/chat/completions',
+      defaultModel: 'llama-3.3-70b',
+      suggestedModels: ['llama-3.3-70b', 'qwen-3-32b'],
+      badgeTag: 'Siêu tốc',
+      site: 'https://cloud.cerebras.ai/',
+    },
+    deepseek: {
+      id: 'deepseek',
+      kind: 'openai',
+      label: 'DeepSeek Official',
+      keyPlaceholder: 'Key DeepSeek bắt đầu bằng sk-...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.deepseek.com/chat/completions',
+      defaultModel: 'deepseek-chat',
+      suggestedModels: ['deepseek-chat', 'deepseek-reasoner'],
+      badgeTag: 'Giá rẻ + Chuẩn',
+      site: 'https://platform.deepseek.com/api_keys',
+    },
+    xai: {
+      id: 'xai',
+      kind: 'openai',
+      label: 'xAI (Grok)',
+      keyPlaceholder: 'Key xAI bắt đầu bằng xai-...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.x.ai/v1/chat/completions',
+      defaultModel: 'grok-3-mini',
+      suggestedModels: ['grok-3-mini', 'grok-3'],
+      site: 'https://console.x.ai/',
+    },
+    mistral: {
+      id: 'mistral',
+      kind: 'openai',
+      label: 'Mistral AI',
+      keyPlaceholder: 'API key từ La Plateforme (console.mistral.ai)',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.mistral.ai/v1/chat/completions',
+      defaultModel: 'mistral-small-latest',
+      suggestedModels: ['mistral-small-latest', 'mistral-large-latest'],
+      site: 'https://console.mistral.ai/api-keys',
+    },
+    together: {
+      id: 'together',
+      kind: 'openai',
+      label: 'Together AI',
+      keyPlaceholder: 'Key Together bắt đầu bằng tgp_v1_... hoặc hex key',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.together.xyz/v1/chat/completions',
+      defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+      suggestedModels: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Qwen/Qwen2.5-72B-Instruct-Turbo'],
+      site: 'https://api.together.ai/settings/api-keys',
+    },
+    fireworks: {
+      id: 'fireworks',
+      kind: 'openai',
+      label: 'Fireworks AI',
+      keyPlaceholder: 'Key Fireworks bắt đầu bằng fw_...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.fireworks.ai/inference/v1/chat/completions',
+      defaultModel: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+      suggestedModels: ['accounts/fireworks/models/llama-v3p3-70b-instruct'],
+      site: 'https://fireworks.ai/account/api-keys',
+    },
+    perplexity: {
+      id: 'perplexity',
+      kind: 'openai',
+      label: 'Perplexity',
+      keyPlaceholder: 'Key Perplexity bắt đầu bằng pplx-...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.perplexity.ai/chat/completions',
+      defaultModel: 'sonar',
+      suggestedModels: ['sonar', 'sonar-pro'],
+      badgeTag: 'Tìm kiếm Web',
+      site: 'https://www.perplexity.ai/settings/api',
+    },
+    siliconflow: {
+      id: 'siliconflow',
+      kind: 'openai',
+      label: 'SiliconFlow',
+      keyPlaceholder: 'Key SiliconFlow bắt đầu bằng sk-...',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.siliconflow.cn/v1/chat/completions',
+      defaultModel: 'Qwen/Qwen2.5-72B-Instruct',
+      suggestedModels: ['Qwen/Qwen2.5-72B-Instruct', 'deepseek-ai/DeepSeek-V3'],
+      site: 'https://cloud.siliconflow.cn/account/ak',
+    },
+    cohere: {
+      id: 'cohere',
+      kind: 'openai',
+      label: 'Cohere Compatibility',
+      keyPlaceholder: 'API key từ dashboard.cohere.com',
+      needsModel: true,
+      needsUrl: true,
+      defaultUrl: 'https://api.cohere.com/compatibility/v1/chat/completions',
+      defaultModel: 'command-a-03-2025',
+      suggestedModels: ['command-a-03-2025', 'command-r-plus-08-2024'],
+      site: 'https://dashboard.cohere.com/api-keys',
+    },
+  };
+
+  // Nguồn origin mặc định duy nhất dùng chung giữa background.js và options.js.
+  const BUILTIN_ORIGINS = [...new Set([
+    'https://translate.googleapis.com',
+    'https://translate.google.com',
+    'https://api.mymemory.translated.net',
+    'https://api.openai.com',
+    'https://generativelanguage.googleapis.com',
+    'https://api-free.deepl.com',
+    'https://api.deepl.com',
+    'https://api-sf1-cdn.deploy.com',
+    'https://api.anthropic.com',
+    ...Object.values(PROVIDER_PRESETS)
+      .map(preset => {
+        try { return preset.defaultUrl ? new URL(preset.defaultUrl).origin : ''; }
+        catch (_) { return ''; }
+      })
+      .filter(Boolean),
+  ])];
 
   /* ------------------------------------------------------------------
    * Deploy.com API — endpoint OpenAI-compatible, model dạng vendor/model.
@@ -111,52 +356,64 @@
     ];
   }
 
-  // Provider đọc được ảnh: Gemini (inline_data) và Deploy (image_url).
+  function supportsVision(id, providerConfig) {
+    const kind = providerKind(id);
+    if (kind === 'gemini' || kind === 'deploy' || kind === 'anthropic') return true;
+    if (PROVIDER_PRESETS[id]?.supportsVision) return true;
+    return Boolean(providerConfig?.supportsVision);
+  }
+
+  // Provider đọc được ảnh: Gemini (inline_data), Deploy (image_url), Anthropic (base64), OpenRouter.
   function visionProviderIds(config) {
     return providerIdsOf(config).filter(id => {
-      const kind = providerKind(id);
-      if (kind !== 'gemini' && kind !== 'deploy') return false;
       const provider = config?.providers?.[id];
-      return Boolean(provider?.enabled && provider.keys?.length);
+      if (!provider?.enabled || !activeKeysOf(provider).length) return false;
+      return supportsVision(id, provider);
     });
   }
 
   /* ------------------------------------------------------------------
-   * Nhiều endpoint OpenAI-compatible chạy song song.
-   *
-   * PROVIDER_DEFS chỉ mô tả BA KIỂU provider (deepl / gemini / openai), còn
-   * kiểu openai được phép có nhiều bản: 'openai' là slot đầu, các slot sau
-   * mang id 'openai-2', 'openai-3'... mỗi slot có url/model/format/key riêng
-   * nên Groq + OpenRouter + API tự host cùng nằm trong một vòng xoay key.
-   * Mọi chỗ dựng request làm việc theo KIỂU (providerKind); chỉ UI và thông
-   * báo lỗi mới cần id/tên cụ thể của từng slot.
+   * Nhiều endpoint OpenAI-compatible + 12 Preset chạy song song.
    * ------------------------------------------------------------------ */
   const CUSTOM_PROVIDER_RE = /^openai-(\d+)$/;
   const MAX_CUSTOM_PROVIDERS = 20;
+
+  function isPresetProvider(id) {
+    return Boolean(PROVIDER_PRESETS[String(id || '')]);
+  }
 
   function isCustomProvider(id) {
     return CUSTOM_PROVIDER_RE.test(String(id || ''));
   }
 
   function providerKind(id) {
-    return isCustomProvider(id) ? 'openai' : String(id || '');
+    const raw = String(id || '');
+    if (isPresetProvider(raw)) return PROVIDER_PRESETS[raw].kind;
+    return isCustomProvider(raw) ? 'openai' : raw;
   }
 
   function providerDefOf(id) {
-    return PROVIDER_DEFS[providerKind(id)] || null;
+    const raw = String(id || '');
+    if (PROVIDER_PRESETS[raw]) return PROVIDER_PRESETS[raw];
+    return PROVIDER_DEFS[providerKind(raw)] || null;
   }
 
-  // Tên hiển thị: mọi slot OpenAI-compatible đều đặt tên được (Groq, OpenRouter…);
-  // chưa đặt thì slot đầu giữ nhãn mặc định, các slot sau đánh số.
+  // Tên hiển thị: đặt tên tùy chỉnh -> tên preset / label gốc / đánh số slot custom.
   function providerLabelOf(id, providerConfig) {
     const name = String(providerConfig?.name || '').trim();
     if (name) return name;
-    const custom = CUSTOM_PROVIDER_RE.exec(String(id || ''));
+    const raw = String(id || '');
+    if (PROVIDER_PRESETS[raw]) return PROVIDER_PRESETS[raw].label;
+    const custom = CUSTOM_PROVIDER_RE.exec(raw);
     if (custom) return `API tùy chỉnh ${custom[1]}`;
-    return providerDefOf(id)?.label || String(id || '');
+    return providerDefOf(raw)?.label || raw;
   }
 
-  // Thứ tự hiển thị: ba provider dựng sẵn, rồi tới các slot tùy chỉnh theo số.
+  function presetProviderIds(source) {
+    return PRESET_ORDER.filter(id => Boolean(source?.providers?.[id]));
+  }
+
+  // Thứ tự hiển thị: 4 provider gốc -> preset đã thêm -> slot tùy chỉnh theo số.
   function customProviderIds(source) {
     return Object.keys(source?.providers || {})
       .filter(isCustomProvider)
@@ -165,7 +422,7 @@
   }
 
   function providerIdsOf(config) {
-    return [...PROVIDER_ORDER, ...customProviderIds(config)];
+    return [...PROVIDER_ORDER, ...presetProviderIds(config), ...customProviderIds(config)];
   }
 
   // Id còn trống cho slot tùy chỉnh mới ('' nếu đã kịch trần).
@@ -235,7 +492,7 @@
       enabled: false,
       keys: [],
       // Chỉ kiểu OpenAI-compatible mới cần tên riêng: có nhiều slot cùng kiểu.
-      ...(def.needsUrl ? { name: '' } : {}),
+      ...(def.needsUrl ? { name: isPresetProvider(id) ? def.label : '' } : {}),
       ...(def.needsModel ? { model: def.defaultModel } : {}),
       ...(providerKind(id) === 'gemini' ? { googleSearch: true, extendedThinking: false } : {}),
       // Deploy: mặc định suy luận sâu nhất (đọc được ảnh qua image_url).
@@ -246,8 +503,6 @@
       ...(def.needsUrl ? { url: def.defaultUrl, format: 'auto' } : {}),
     };
   }
-
-  const TONES = ['natural', 'professional', 'casual'];
 
   /* ------------------------------------------------------------------
    * Nhập key theo lô.
@@ -310,7 +565,7 @@
   }
 
   // Tiền tố key quen mặt của các provider phổ biến.
-  const KEY_PREFIX_RE = /AIza|AQ\.|sk-|gsk_|xai-|hf_|ya29\./g;
+  const KEY_PREFIX_RE = /AIza|AQ\.|sk-ant-|sk-or-|sk-|gsk_|csk-|xai-|hf_|ya29\.|pplx-|fw_|tgp_/g;
   // Một key thật ngắn nhất trong các dạng dưới đây vẫn dài hơn con số này.
   const MIN_RUN_PIECE = 24;
 
@@ -433,24 +688,50 @@
     if (!value) return '';
     if (/^AIza[\w-]{10,}$/.test(value) || /^AQ\./.test(value)) return 'gemini';
     if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?::[a-z]{2})?$/i.test(value)) return 'deepl';
-    if (/^(?:sk|gsk|xai|hf|or|pk)[-_]/i.test(value)) return 'openai';
+    if (/^sk-ant-[\w-]{10,}$/i.test(value)) return 'anthropic';
+    if (/^(?:sk|gsk|xai|hf|or|pk|csk|pplx|fw|tgp)[-_]/i.test(value)) return 'openai';
     // Token deploy.com là base64 thô kết thúc bằng "==" (vd: AbCdEfGhIjKlMnOpQrStUv==).
     if (/^[A-Za-z0-9+/]{16,}={2}$/.test(value) && value.length % 4 === 0) return 'deploy';
     return '';
   }
 
-  /* Cảnh báo mềm khi key trông sai định dạng của provider: KHÔNG chặn lưu
-   * (API tự host / proxy có thể dùng key kiểu khác), chỉ nhắc để người dùng
-   * biết trước vì sao key đó sẽ bị từ chối. */
+  /* Định tuyến chi tiết từng preset cho Dashboard / Universal Key Dropzone. */
+  function detectPresetForKey(key) {
+    const value = String(key || '').trim();
+    if (!value) return '';
+    if (/^AIza[\w-]{10,}$/.test(value) || /^AQ\./.test(value)) return 'gemini';
+    if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?::[a-z]{2})?$/i.test(value)) return 'deepl';
+    if (/^sk-ant-[\w-]{10,}$/i.test(value)) return 'anthropic';
+    if (/^sk-or-[\w-]{10,}$/i.test(value)) return 'openrouter';
+    if (/^gsk_[\w-]{10,}$/i.test(value)) return 'groq';
+    if (/^csk-[\w-]{10,}$/i.test(value)) return 'cerebras';
+    if (/^xai-[\w-]{10,}$/i.test(value)) return 'xai';
+    if (/^pplx-[\w-]{10,}$/i.test(value)) return 'perplexity';
+    if (/^fw_[\w-]{10,}$/i.test(value)) return 'fireworks';
+    if (/^tgp_(?:v\d+_)?[\w-]{10,}$/i.test(value)) return 'together';
+    if (/^[A-Za-z0-9+/]{16,}={2}$/.test(value) && value.length % 4 === 0) return 'deploy';
+    if (/^(?:sk|hf|or|pk)[-_]/i.test(value)) return 'openai';
+    return '';
+  }
+
+  /* Cảnh báo mềm khi key trông sai định dạng của provider. */
   function keyFormatWarning(providerId, key) {
     const value = String(key || '');
     if (providerKind(providerId) === 'gemini' && !value.startsWith('AIza')) {
       return 'Key Gemini chuẩn bắt đầu bằng "AIza". Key dạng "AQ." là key bị Google giới hạn — Gemini API sẽ từ chối. Hãy tạo key "AIza" bằng project/tài khoản Google khác, hoặc tạo trong Google Cloud Console.';
     }
+    if (providerId === 'anthropic' && !value.startsWith('sk-ant-')) {
+      return 'Key Anthropic Claude chuẩn thường bắt đầu bằng "sk-ant-".';
+    }
     return '';
   }
 
-  // Chấp nhận cả entry dạng chuỗi ("key") lẫn { key, label }; bỏ rỗng và trùng.
+  function activeKeysOf(providerConfig) {
+    return (Array.isArray(providerConfig?.keys) ? providerConfig.keys : [])
+      .filter(entry => entry && entry.key && entry.disabled !== true);
+  }
+
+  // Chấp nhận cả entry dạng chuỗi ("key") lẫn { key, label, disabled? }; chỉ giữ disabled khi true.
   function normalizeKeyList(list) {
     const seen = new Set();
     const entries = [];
@@ -459,25 +740,24 @@
       const key = String((isText ? entry : entry?.key) || '').trim();
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      entries.push({ key, label: String((isText ? '' : entry?.label) || '').trim() });
+      const item = { key, label: String((isText ? '' : entry?.label) || '').trim() };
+      if (!isText && entry?.disabled === true) item.disabled = true;
+      entries.push(item);
     }
     return entries;
   }
 
   function normalizeConfig(raw) {
-    // Ba provider dựng sẵn luôn có mặt; slot tùy chỉnh lấy theo đúng những id
-    // đang nằm trong config (người dùng thêm/xoá bao nhiêu cũng được).
-    const ids = [...PROVIDER_ORDER, ...customProviderIds(raw)];
+    const ids = [...PROVIDER_ORDER, ...presetProviderIds(raw), ...customProviderIds(raw)];
     const config = {
       preferred: ids.includes(raw?.preferred) ? raw.preferred : PROVIDER_ORDER[0],
       tone: TONES.includes(raw?.tone) ? raw.tone : 'natural',
+      routingStrategy: ROUTING_STRATEGIES.includes(raw?.routingStrategy) ? raw.routingStrategy : 'failover',
       providers: {},
     };
     for (const id of ids) {
       const base = emptyProviderConfig(id);
       const incoming = raw?.providers?.[id] || {};
-      // keys có thể là mảng {key,label}, mảng chuỗi, hoặc (config nhập tay/
-      // import) cả một chuỗi nhiều key — bóc hết về danh sách chuẩn.
       const keys = typeof incoming.keys === 'string'
         ? parseKeysInput(incoming.keys).entries
         : incoming.keys;
@@ -486,8 +766,7 @@
         ...incoming,
         enabled: incoming.enabled !== undefined ? Boolean(incoming.enabled) : base.enabled,
         keys: normalizeKeyList(keys),
-        ...(base.name !== undefined ? { name: String(incoming.name || '').trim().slice(0, 40) } : {}),
-        // Mức suy luận của Deploy: giá trị lạ trong config không được đẩy lên API.
+        ...(base.name !== undefined ? { name: String(incoming.name || base.name || '').trim().slice(0, 40) } : {}),
         ...(providerKind(id) === 'deploy' ? {
           reasoningEffort: deployReasoningEffort(incoming),
           translateReasoningEffort: deployTranslateReasoning(incoming),
@@ -507,9 +786,13 @@
     return orderedProviderIds(config).filter(id => {
       const provider = config.providers[id];
       if (!provider?.enabled) return false;
-      // OpenAI-compatible cho phép không cần key (API free tự host).
-      if (providerKind(id) === 'openai') return true;
-      return provider.keys.length > 0;
+      const active = activeKeysOf(provider);
+      // OpenAI-compatible gốc ('openai' và 'openai-N') cho phép không key nếu chưa nhập key nào (local API).
+      if (providerKind(id) === 'openai' && !isPresetProvider(id)) {
+        if (provider.keys.length === 0) return true;
+        return active.length > 0;
+      }
+      return active.length > 0;
     });
   }
 
@@ -524,95 +807,7 @@
     return PROVIDER_DEFS.deepl.endpointFor(key).replace(/\/v2\/translate$/, '/v2/usage');
   }
 
-  /* ------------------------------------------------------------------
-   * Prompt dịch kiểu bản địa. Ba phong cách:
-   *  - natural:      bám giọng văn gốc, tự nhiên như ngưởi bản xứ viết
-   *  - professional: email, LinkedIn, chat công việc — lịch sự, rõ ràng
-   *  - casual:       chat bạn bè, mạng xã hội — thoải mái, đủ thân mật
-   * ------------------------------------------------------------------ */
-  function buildNativeInstructions(tone = 'natural') {
-    const base = [
-      'You are a bilingual Vietnamese-English localization editor who writes like a true native English speaker in each specific context (chat, email, social post, review, comment, forum reply).',
-      'Rewrite the Vietnamese source as the most natural, idiomatic English a native speaker would actually type in this exact situation.',
-      'Mirror the author\'s voice: match their formality, energy, age vibe, humor, attitude, and politeness level. Do not flatten personality.',
-      'Preserve emojis, punctuation style, capitalization habits, line breaks, @mentions, #hashtags, URLs, product names, code, commands, and established game/tech terms.',
-      'Handle Vietnamese pronouns and particles (anh/chị/em/cậu/tớ/mình/tao/mày/ơi/nhé/đấy/nha/ạ...) as natural English social tone — never transliterate or explain them. Drop particles the way natives would, keep the warmth or attitude they carry.',
-      'Translate idioms and slang into equivalent English idioms and slang — never literally. If the source is playful or teasing, the English must land the same way.',
-      'Default to standard contractions (I\'m, don\'t, gonna, wanna) in informal text and complete, polished sentences in formal text — unless the tone register below overrides this.',
-      'If the source is a fragment, keep it a fragment. Do not complete, answer, explain, or react to the message.',
-      'When gender or relationship is unclear, choose natural neutral English rather than inventing details.',
-      'Do not add quotation marks, labels, notes, alternatives, or any wrapper. Return only the final English text.',
-    ];
-
-    const overlays = {
-      natural: [
-        'Default register: whatever the source sounds like — that is exactly how the English should sound.',
-      ],
-      professional: [
-        'Register: PROFESSIONAL. Write like a competent, courteous professional: work email, LinkedIn, business chat.',
-        'Polished and concise but still warm — never stiff, robotic, or overly formal. No slang, no text-speak, correct grammar throughout.',
-      ],
-      casual: [
-        'Register: CASUAL — you are a real person in your early 20s texting a friend, NOT an author writing prose.',
-        'HARD RULE: never write apostrophes in contractions. Always write im, dont, doesnt, didnt, cant, wont, isnt, arent, couldnt, shouldnt, wouldnt, thats, its, hes, shes, youre, theyre, yall — with NO apostrophe. This overrides the base rule about standard contractions.',
-        'Use real texting shorthand when it fits: idk, rn, tbh, ngl, fr, bc, cuz, lol, lmao, btw, omg, pls, thx, msg, tmr, tn, wyd, brb, gtg, ong, fs, smh, nvm. Do not force it into every line.',
-        'Prefer casual word forms over formal ones: gonna, wanna, gotta, kinda, sorta, lemme, gimme, dunno, aight.',
-        'Lowercase is the default vibe; CAPS only for emphasis. Minimal punctuation — no semicolons, no em dashes, and drop the final period like real chats.',
-        'Keep it short like a real text. Fragments are fine; never pad or complete into polished sentences.',
-        'Match the emoji/slang energy of the source. If the Vietnamese is playful or uses wordplay, the English must play back with equivalent English slang or wordplay — never translate jokes literally.',
-        'Examples — "anh ơi tối nay đi chơi hong" -> "hey u free tn?" | "em đang làm gì đó" -> "wyd" | "đùa thôi đừng giận nha" -> "jk jk dont be mad lol" | "tôi không biết nữa, chắc để mai" -> "idk tbh maybe tmr" | "đợi tôi tí, tôi đang ăn cơm" -> "gimme a sec im eating"',
-      ],
-    };
-
-    return [...base, ...(overlays[tone] || overlays.natural)].join('\n');
-  }
-
-  function buildPrompt(source, context) {
-    return context ? `${context}\n\nVietnamese source:\n${source}` : source;
-  }
-
-  /* ------------------------------------------------------------------
-   * Lớp 2 của tone casual: hậu xử lý cơ học. Model (hoặc DeepL) lỡ giữ
-   * văn chuẩn thì vẫn bị ép về kiểu nhắn tin: bỏ apostrophe trong các
-   * cụm co thông dụng. Chỉ áp dụng cho tone 'casual', chỉ đường single
-   * (input helper) — KHÔNG áp cho dịch trang/batch.
-   * ------------------------------------------------------------------ */
-  const CASUAL_REWRITES = [
-    [/\bI'm\b/g, 'im'],
-    [/\bI am\b/g, 'im'],
-    [/\bdon't\b/gi, 'dont'],
-    [/\bdoesn't\b/gi, 'doesnt'],
-    [/\bdidn't\b/gi, 'didnt'],
-    [/\bcan't\b/gi, 'cant'],
-    [/\bcannot\b/gi, 'cant'],
-    [/\bwon't\b/gi, 'wont'],
-    [/\bisn't\b/gi, 'isnt'],
-    [/\baren't\b/gi, 'arent'],
-    [/\bcouldn't\b/gi, 'couldnt'],
-    [/\bshouldn't\b/gi, 'shouldnt'],
-    [/\bwouldn't\b/gi, 'wouldnt'],
-    [/\bthat's\b/gi, 'thats'],
-    [/\bit's\b/gi, 'its'],
-    [/\bhe's\b/gi, 'hes'],
-    [/\bshe's\b/gi, 'shes'],
-    [/\byou're\b/gi, 'youre'],
-    [/\bthey're\b/gi, 'theyre'],
-    [/\by'all\b/gi, 'yall'],
-    [/\bcould've\b/gi, 'couldve'],
-    [/\bshould've\b/gi, 'shouldve'],
-    [/\bwould've\b/gi, 'wouldve'],
-    // Để cuối: đại từ "I" đứng riêng -> "i" (kiểu nhắn tin). Chạy sau các
-    // quy tắc trên nên "I'm" đã thành "im" từ trước, không bị tác động.
-    [/\bI\b/g, 'i'],
-  ];
-
-  function humanizeCasual(text) {
-    let out = String(text ?? '');
-    for (const [pattern, replacement] of CASUAL_REWRITES) {
-      out = out.replace(pattern, replacement);
-    }
-    return out;
-  }
+  // Phần định nghĩa & build prompt đã tách sang prompts.js (nạp vào biến local phía trên).
 
   /* ------------------------------------------------------------------
    * Dựng request theo từng provider.
@@ -635,6 +830,62 @@
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
     return { url, model, format, headers };
+  }
+
+  // Multimodal (QA có ảnh / Vision / OCR) dùng chat/completions `image_url`;
+  // nếu endpoint đang trỏ `/responses`, chuyển sang `/chat/completions` thay vì nuốt ảnh.
+  function resolveOpenAIVisionRequest(providerConfig, apiKey) {
+    const resolved = resolveOpenAIRequest(providerConfig, apiKey);
+    if (resolved.format === 'libre' || resolved.format === 'generic') {
+      throw new Error('IMAGE_NEEDS_VISION');
+    }
+    if (resolved.format === 'responses') {
+      return {
+        ...resolved,
+        url: resolved.url.replace(/\/responses\/?$/i, '/chat/completions'),
+        format: 'chat',
+      };
+    }
+    return resolved;
+  }
+
+  /* Request Anthropic Claude (/v1/messages): hỗ trợ text, batch JSON, Vision ảnh base64. */
+  function buildAnthropicRequest({ providerConfig, apiKey, system, prompt, image, maxTokens = 4096, temperature = 0.1, timeoutMs }) {
+    const model = String(providerConfig?.model || PROVIDER_DEFS.anthropic.defaultModel).trim();
+    const content = image?.imageBase64
+      ? [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: String(image.mimeType || 'image/png'),
+              data: String(image.imageBase64 || ''),
+            },
+          },
+          { type: 'text', text: String(prompt || '') },
+        ]
+      : String(prompt || '');
+
+    const payload = {
+      model,
+      max_tokens: Number.isFinite(maxTokens) ? maxTokens : 4096,
+      messages: [{ role: 'user', content }],
+    };
+    if (system) payload.system = String(system);
+    if (Number.isFinite(temperature)) payload.temperature = temperature;
+
+    return {
+      url: PROVIDER_PRESETS.anthropic.defaultUrl,
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'x-api-key': String(apiKey || '').trim(),
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(payload),
+      ...(Number(timeoutMs) > 0 ? { timeout: Number(timeoutMs) } : {}),
+    };
   }
 
   /* Request deploy.com: chat/completions + reasoning_effort + (tuỳ chọn) ảnh.
@@ -686,9 +937,9 @@
     };
   }
 
-  function buildRequest({ providerId, providerConfig, apiKey, source, context, tone }) {
+  function buildRequest({ providerId, providerConfig, apiKey, source, context, tone, systemOverride }) {
     const kind = providerKind(providerId);
-    const instructions = buildNativeInstructions(tone);
+    const instructions = buildNativeInstructions(tone, systemOverride);
     const prompt = buildPrompt(source, context);
 
     if (kind === 'deepl') {
@@ -726,6 +977,10 @@
           safetySettings: GEMINI_SAFETY_SETTINGS,
         }),
       };
+    }
+
+    if (kind === 'anthropic') {
+      return buildAnthropicRequest({ providerConfig, apiKey, system: instructions, prompt, maxTokens: 1500, temperature: 0.1 });
     }
 
     if (kind === 'openai') {
@@ -949,6 +1204,10 @@
         }
       }
       text = textChunks.join('').trim();
+    } else if (kind === 'anthropic') {
+      text = Array.isArray(data?.content)
+        ? data.content.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('').trim()
+        : '';
     } else {
       text = extractOpenAIText(data, openaiFormat || 'chat');
     }
@@ -956,7 +1215,7 @@
     if (!text) {
       // Reasoning model có thể nghĩ hết sạch trần token rồi trả content rỗng:
       // báo đúng nguyên nhân thay vì "không nhận diện được trường bản dịch".
-      const truncated = data?.choices?.[0]?.finish_reason === 'length';
+      const truncated = data?.choices?.[0]?.finish_reason === 'length' || data?.stop_reason === 'max_tokens';
       return {
         kind: 'providerFailed',
         message: truncated
@@ -968,143 +1227,7 @@
     return { kind: 'ok', text };
   }
 
-  /* ------------------------------------------------------------------
-   * Dịch BATCH (dịch cả trang): tự nhiên, trôi chảy như ngườ bản xứ viết
-   * nhưng giữ nguyên format/placeholder. KHÔNG dùng buildNativeInstructions
-   * (prompt đó là rewrite VI->EN của input helper, không dành cho dịch trang).
-   * ------------------------------------------------------------------ */
-
-  /* ------------------------------------------------------------------
-   * Tuỳ chọn văn phong dịch trang (page style). Chỉ có tác dụng qua
-   * provider LLM (gemini/openai) — DeepL là engine dịch thuần, bỏ qua.
-   * instruction: chuỗi tiếng Anh chèn thẳng vào system instruction.
-   * ------------------------------------------------------------------ */
-  const PAGE_STYLES = {
-    natural:      { label: 'Tự nhiên',             instruction: '' }, // base đã đủ
-    casual:       { label: 'Trò chuyện thân mật',  instruction: 'Register: casual chat between friends — relaxed, warm, natural contractions and texting shorthand where it fits (idk, rn, tbh, ngl, lol, gonna, wanna...). Never stiff or formal.' },
-    'work-email': { label: 'Email công việc',      instruction: 'Register: professional work email — courteous, polished, concise. Proper greetings/closings if present. No slang, no text-speak, grammatically impeccable.' },
-    'game-chat':  { label: 'Chat game',            instruction: 'Register: in-game / gamer chat — keep game titles, item names, and gaming terms untranslated; match the trash-talk/hype energy; gaming slang welcome (gg, wp, noob, camping, buff, nerf...).' },
-    genz:         { label: 'Văn phong Gen Z',      instruction: 'Register: Gen Z internet voice — current slang where it fits (fr, no cap, lowkey, highkey, bet, slay, sus, vibe...), playful and punchy, never corporate. Do not force slang into every line.' },
-    formal:       { label: 'Lịch sự, trang trọng', instruction: 'Register: formal and respectful — polite, complete sentences, honorific-aware. For Vietnamese output use appropriate kính ngữ (anh/chị/quý/cậu...); no slang.' },
-  };
-
-  // Dialect chỉ áp khi đích là English (dịch ra VI thì vô nghĩa).
-  const PAGE_DIALECTS = {
-    us: { label: 'Tiếng Anh Mỹ',  instruction: 'Use American English spelling, vocabulary and idioms (color, organize, apartment...).' },
-    uk: { label: 'Tiếng Anh Anh', instruction: 'Use British English spelling, vocabulary and idioms (colour, organise, flat, cheers...).' },
-  };
-
-  const PAGE_MODE_LITERAL_INSTRUCTION = 'Stay close to the source wording and sentence structure — prioritize fidelity over flow.';
-  const PAGE_GRAMMAR_FIX_INSTRUCTION = 'The output must be grammatically flawless in the target language — silently fix any grammar, spelling, or punctuation issue. Never output broken grammar.';
-  const PAGE_KEEP_PROPER_NOUNS_INSTRUCTION = 'Keep proper nouns (people, brands, places, products, usernames) unchanged — never translate or transliterate names.';
-
-  const DEFAULT_PAGE_OPTIONS = {
-    style: 'natural',
-    dialect: 'us',
-    mode: 'natural',
-    grammarFix: false,
-    keepProperNouns: true,
-    customPrompt: '',
-    glossaryText: '',
-    docMode: false,
-  };
-
-  // Giới hạn độ dài field tự do: chặn prompt injection quá dài / lạm dụng token.
-  const MAX_CUSTOM_PROMPT_CHARS = 2000;
-  const MAX_GLOSSARY_CHARS = 8000;
-  // Ngữ cảnh trang (v4.4): cap từng field để prompt không phình theo meta lạ.
-  const MAX_PAGE_CONTEXT_CHARS = { host: 100, title: 150, siteName: 100, description: 300 };
-
-  // pageContext { host, title, siteName, description } -> chuỗi 1 dòng cho prompt;
-  // null nếu caller không gửi / toàn ký tự rỗng / sai kiểu.
-  function normalizePageContext(raw) {
-    if (!raw || typeof raw !== 'object') return null;
-    const clip = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
-    const ctx = {
-      host: clip(raw.host, MAX_PAGE_CONTEXT_CHARS.host),
-      title: clip(raw.title, MAX_PAGE_CONTEXT_CHARS.title),
-      siteName: clip(raw.siteName, MAX_PAGE_CONTEXT_CHARS.siteName),
-      description: clip(raw.description, MAX_PAGE_CONTEXT_CHARS.description),
-    };
-    if (!ctx.host && !ctx.title && !ctx.siteName && !ctx.description) return null;
-    return ctx;
-  }
-
-  // Sanitize pageOptions từ caller: giá trị lạ/sai kiểu -> về default.
-  function normalizePageOptions(raw) {
-    return {
-      style: PAGE_STYLES[raw?.style] ? raw.style : DEFAULT_PAGE_OPTIONS.style,
-      dialect: PAGE_DIALECTS[raw?.dialect] ? raw.dialect : DEFAULT_PAGE_OPTIONS.dialect,
-      mode: raw?.mode === 'literal' || raw?.mode === 'natural' ? raw.mode : DEFAULT_PAGE_OPTIONS.mode,
-      grammarFix: typeof raw?.grammarFix === 'boolean' ? raw.grammarFix : DEFAULT_PAGE_OPTIONS.grammarFix,
-      keepProperNouns: typeof raw?.keepProperNouns === 'boolean' ? raw.keepProperNouns : DEFAULT_PAGE_OPTIONS.keepProperNouns,
-      customPrompt: typeof raw?.customPrompt === 'string'
-        ? raw.customPrompt.trim().slice(0, MAX_CUSTOM_PROMPT_CHARS)
-        : DEFAULT_PAGE_OPTIONS.customPrompt,
-      glossaryText: typeof raw?.glossaryText === 'string'
-        ? raw.glossaryText.trim().slice(0, MAX_GLOSSARY_CHARS)
-        : DEFAULT_PAGE_OPTIONS.glossaryText,
-      docMode: typeof raw?.docMode === 'boolean' ? raw.docMode : DEFAULT_PAGE_OPTIONS.docMode,
-      pageContext: normalizePageContext(raw?.pageContext),
-    };
-  }
-
-  // Thứ tự lines: 4 base -> style -> dialect (chỉ target English) -> literal
-  // -> grammarFix -> properNouns -> line chốt idiomatic (khi có rule bổ sung)
-  // -> pageContext (ngữ cảnh trang, v4.4) -> docMode -> glossary
-  // -> customPrompt (ưu tiên cao nhất, đứng cuối).
-  function buildBatchInstructions(sourceLanguage, targetName, pageOptions) {
-    const opts = normalizePageOptions(pageOptions);
-    const src = sourceLanguage && sourceLanguage !== 'auto'
-      ? sourceLanguage
-      : 'the detected source language';
-    const lines = [
-      `Translate each array element from ${src} to ${targetName}. Return ONLY a JSON array of strings, same order and length. No commentary.`,
-      'Translate naturally and fluently, the way a native speaker would actually write — never word-for-word — while keeping the exact meaning of each element.',
-      'Preserve formatting, line breaks, placeholders ({name}, %s, $1...), emojis, proper names, URLs, and code exactly as they appear.',
-      'If an element is already in the target language or cannot be translated, return it unchanged.',
-    ];
-
-    const extras = [];
-    if (opts.style !== 'natural') extras.push(PAGE_STYLES[opts.style].instruction);
-    if (targetName === 'English') extras.push(PAGE_DIALECTS[opts.dialect].instruction);
-    if (opts.mode === 'literal') extras.push(PAGE_MODE_LITERAL_INSTRUCTION);
-    if (opts.grammarFix) extras.push(PAGE_GRAMMAR_FIX_INSTRUCTION);
-    if (opts.keepProperNouns) extras.push(PAGE_KEEP_PROPER_NOUNS_INSTRUCTION);
-    if (extras.length) {
-      extras.push(`Apply every style rule above idiomatically in ${targetName} — express the register the way a native ${targetName} speaker would, not literally.`);
-    }
-
-    const finalLines = [...lines, ...extras];
-    // Ngữ cảnh trang (v4.4): giúp model chọn nghĩa đúng lĩnh vực cho từ đa nghĩa —
-    // "feed" trên MXH là "bảng tin", trên web thú cưng là "cho ăn/thức ăn".
-    if (opts.pageContext) {
-      const ctx = opts.pageContext;
-      const parts = [];
-      if (ctx.host) parts.push(`website: ${ctx.host}`);
-      if (ctx.siteName) parts.push(`site name: "${ctx.siteName}"`);
-      if (ctx.title) parts.push(`page title: "${ctx.title}"`);
-      if (ctx.description) parts.push(`page description: "${ctx.description}"`);
-      finalLines.push(
-        `Page context — ${parts.join('; ')}.`,
-        'Use the page context to pick domain-appropriate meanings for ambiguous words (e.g. "feed" means "bảng tin" on a social network but "cho ăn/thức ăn" on a pet site; "post" can be "bài đăng" or "cột/bưu kiện"; "like" can be "thích" or "như/giống"). When the context does not clarify a word, fall back to its most common meaning.',
-      );
-    }
-    // Tài liệu kỹ thuật: giữ nguyên code/lệnh/path, chỉ dịch văn xuôi.
-    if (opts.docMode) {
-      finalLines.push('This page is technical documentation: keep all code, inline code, commands, file paths and identifiers unchanged; translate only prose.');
-    }
-    // Glossary thuật ngữ của user: ưu tiên cao hơn cách dịch mặc định.
-    if (opts.glossaryText) {
-      finalLines.push(`Always apply this terminology glossary (highest priority for these terms):\n${opts.glossaryText}`);
-    }
-    // Chỉ dẫn tự do của user: đứng cuối, được phép ghi đè rule phía trên.
-    if (opts.customPrompt) {
-      finalLines.push(`Additional user instructions (override the rules above if conflicting):\n${opts.customPrompt}`);
-    }
-
-    return finalLines.join('\n');
-  }
+  // Các constant & builder cho batch instructions đã được tách sang prompts.js.
 
   function buildBatchRequest({ providerId, providerConfig, apiKey, texts, sourceLanguage, targetLanguage, pageOptions }) {
     const kind = providerKind(providerId);
@@ -1129,14 +1252,17 @@
       };
     }
 
-    // pageOptions chỉ áp cho LLM (gemini/openai); nhánh deepl ở trên đã return sớm.
+    // pageOptions chỉ áp cho LLM; nhánh deepl ở trên đã return sớm.
     const instructions = buildBatchInstructions(sourceLanguage, target.englishName, pageOptions);
     const prompt = JSON.stringify(texts);
 
     if (kind === 'gemini') {
       const rawModel = String(providerConfig?.model || PROVIDER_DEFS.gemini.defaultModel).trim();
       const model = rawModel.replace(/^models\//i, '');
-      const generationConfig = buildGeminiGenerationConfig(model, 0.1);
+      const generationConfig = {
+        ...buildGeminiGenerationConfig(model, 0.1),
+        responseMimeType: 'application/json',
+      };
       return {
         url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
         method: 'POST',
@@ -1152,6 +1278,10 @@
           safetySettings: GEMINI_SAFETY_SETTINGS,
         }),
       };
+    }
+
+    if (kind === 'anthropic') {
+      return buildAnthropicRequest({ providerConfig, apiKey, system: instructions, prompt, maxTokens: 4096, temperature: 0.1 });
     }
 
     if (kind === 'openai') {
@@ -1184,11 +1314,21 @@
     throw new Error(`Provider không hỗ trợ: ${providerId}`);
   }
 
-  // Parse khoan dung mảng JSON từ text model trả về (strip fence, cắt [ ... ]).
+  // Parse khoan dung mảng JSON từ text model trả về (strip fence, unwrap object, cắt [ ... ]).
   function parseJsonArrayText(raw) {
     let text = String(raw || '').trim();
     if (!text) return null;
     text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    try {
+      const direct = JSON.parse(text);
+      if (Array.isArray(direct)) return direct;
+      if (direct && typeof direct === 'object') {
+        const wrapped = direct.translations || direct.data || direct.result || direct.items;
+        if (Array.isArray(wrapped)) return wrapped;
+      }
+    } catch (_) {
+      // Rơi xuống cắt đoạn [...] nếu model chèn thêm lời dẫn.
+    }
     const start = text.indexOf('[');
     const end = text.lastIndexOf(']');
     if (start === -1 || end === -1 || end <= start) return null;
@@ -1226,6 +1366,10 @@
       if (kind === 'gemini') {
         const parts = data?.candidates?.[0]?.content?.parts || [];
         text = parts.map(part => part?.text || '').join('').trim();
+      } else if (kind === 'anthropic') {
+        text = Array.isArray(data?.content)
+          ? data.content.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('').trim()
+          : '';
       } else {
         text = extractOpenAIText(data, openaiFormat || 'chat');
       }
@@ -1250,25 +1394,127 @@
   }
 
   /* ------------------------------------------------------------------
-   * Xoay vòng key: với mỗi provider (theo thứ tự ưu tiên), thử lần lượt
-   * các key chưa bị cooldown. fetchText là hàm inject:
-   *   async fetchText({ url, method, headers, body }) -> { status, bodyText }
-   * keyState do caller giữ (sống trong bộ nhớ service worker):
-   *   { cooldowns: Map("providerId\x00key" -> timestamp), pointers: Map(providerId -> số) }
+   * Multi-Key Engine (v5.0):
+   *  - failover:     ưu tiên tuần tự theo provider, vẫn chọn key rảnh trước khi có nhiều luồng.
+   *  - round-robin:  xoay đều toàn bộ pool key đang bật trên mọi provider.
+   *  - smart-stripe: chấm điểm theo ưu tiên + inflight + độ trễ EMA + errorStreak
+   *                  để tự động phân tải song song qua nhiều hãng & nhiều key cùng lúc.
    * ------------------------------------------------------------------ */
   function createKeyState() {
-    return { cooldowns: new Map(), pointers: new Map(), nextDispatchTime: 0 };
+    return {
+      cooldowns: new Map(),
+      pointers: new Map(),
+      metrics: new Map(),
+      inflight: new Map(),
+      globalPointer: 0,
+      lastProviderId: '',
+      nextDispatchTime: 0,
+      onChange: null,
+    };
+  }
+
+  function ensureKeyStateFields(state) {
+    if (!state.cooldowns) state.cooldowns = new Map();
+    if (!state.pointers) state.pointers = new Map();
+    if (!state.metrics) state.metrics = new Map();
+    if (!state.inflight) state.inflight = new Map();
+    if (!Number.isFinite(state.globalPointer)) state.globalPointer = 0;
+    return state;
   }
 
   function cooldownKey(providerId, key) {
     return `${providerId}${key}`;
   }
 
-  // Vòng lặp rotation dùng chung. attempt({providerId, providerConfig, apiKey})
-  // phải trả về { verdict } (verdict từ classifyResponse/classifyBatchResponse);
-  // attempt throw = không dựng/gửi được request -> sang provider khác.
+  // Mã băm FNV-1a 64-bit để lưu telemetry key trong chrome.storage.session mà không lộ key thô.
+  function keyHashId(providerId, key) {
+    const input = `${providerId}\u0000${key}`;
+    let h1 = 0x811c9dc5;
+    let h2 = 0xc2b2ae35;
+    for (let i = 0; i < input.length; i++) {
+      const code = input.charCodeAt(i);
+      h1 = Math.imul(h1 ^ code, 0x01000193);
+      h2 = Math.imul(h2 ^ code, 0x85ebca6b);
+    }
+    return `${(h1 >>> 0).toString(36)}.${(h2 >>> 0).toString(36)}`;
+  }
+
+  function recordKeyMetric(state, cdKey, { ok, latencyMs, status, now }) {
+    ensureKeyStateFields(state);
+    const prev = state.metrics.get(cdKey) || {
+      emaLatencyMs: 0,
+      lastLatencyMs: 0,
+      successCount: 0,
+      errorCount: 0,
+      errorStreak: 0,
+      lastStatus: '',
+      lastUsedAt: 0,
+    };
+    const lat = Number.isFinite(latencyMs) && latencyMs >= 0 ? Math.round(latencyMs) : prev.lastLatencyMs;
+    const nextEma = ok
+      ? (prev.emaLatencyMs > 0 ? Math.round(prev.emaLatencyMs * 0.65 + lat * 0.35) : lat)
+      : prev.emaLatencyMs;
+
+    state.metrics.set(cdKey, {
+      emaLatencyMs: nextEma,
+      lastLatencyMs: lat,
+      successCount: prev.successCount + (ok ? 1 : 0),
+      errorCount: prev.errorCount + (ok ? 0 : 1),
+      errorStreak: ok ? 0 : Math.min(10, prev.errorStreak + 1),
+      lastStatus: String(status || (ok ? 'ok' : 'error')).slice(0, 120),
+      lastUsedAt: Number(now) || Date.now(),
+    });
+  }
+
+  function exportKeyHealthSnapshot(config, keyState, now = Date.now()) {
+    const state = ensureKeyStateFields(keyState || createKeyState());
+    const cooldowns = {};
+    const metrics = {};
+    for (const id of providerIdsOf(config)) {
+      const keys = config?.providers?.[id]?.keys || [];
+      for (const entry of keys) {
+        if (!entry?.key) continue;
+        const cdKey = cooldownKey(id, entry.key);
+        const hId = keyHashId(id, entry.key);
+        const until = state.cooldowns.get(cdKey) || 0;
+        if (until > now) cooldowns[hId] = until;
+        const metric = state.metrics.get(cdKey);
+        if (metric) metrics[hId] = metric;
+      }
+    }
+    return { cooldowns, metrics, savedAt: now };
+  }
+
+  function hydrateKeyState(keyState, snapshot, config, now = Date.now()) {
+    const state = ensureKeyStateFields(keyState || createKeyState());
+    if (!snapshot || typeof snapshot !== 'object') return state;
+    const cooldowns = snapshot.cooldowns || {};
+    const metrics = snapshot.metrics || {};
+    for (const id of providerIdsOf(config)) {
+      const keys = config?.providers?.[id]?.keys || [];
+      for (const entry of keys) {
+        if (!entry?.key) continue;
+        const cdKey = cooldownKey(id, entry.key);
+        const hId = keyHashId(id, entry.key);
+        if (Number(cooldowns[hId]) > now) state.cooldowns.set(cdKey, Number(cooldowns[hId]));
+        if (metrics[hId] && typeof metrics[hId] === 'object') state.metrics.set(cdKey, metrics[hId]);
+      }
+    }
+    return state;
+  }
+
+  function collectActivePool(config, providerId) {
+    const providerConfig = config.providers[providerId];
+    const active = activeKeysOf(providerConfig);
+    if (active.length) return active;
+    if (providerKind(providerId) === 'openai' && !isPresetProvider(providerId) && providerConfig.keys.length === 0) {
+      return [{ key: '', label: '' }];
+    }
+    return [];
+  }
+
   async function withKeyRotation({ config, keyState, now, sleep, attempt }) {
-    const state = keyState || createKeyState();
+    const state = ensureKeyStateFields(keyState || createKeyState());
     const currentTime = now || (() => Date.now());
     const wait = sleep || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
 
@@ -1277,43 +1523,29 @@
       throw new Error('NO_API_KEY');
     }
 
+    const strategy = ROUTING_STRATEGIES.includes(config?.routingStrategy) ? config.routingStrategy : 'failover';
     const errors = [];
+    const failedProviders = new Set();
 
-    for (const providerId of providerIds) {
-      const providerConfig = config.providers[providerId];
-      // Nhiều slot tùy chỉnh cùng kiểu 'openai' -> lỗi phải gọi đúng tên slot.
-      const providerLabel = providerLabelOf(providerId, providerConfig);
-      // OpenAI-compatible không bắt buộc key: cho phép 1 lượt không key.
-      const keyPool = providerConfig.keys.length ? providerConfig.keys : [{ key: '', label: '' }];
+    async function runSlot(slot) {
+      const { providerId, providerConfig, providerLabel, entry, cdKey, poolLen, index } = slot;
+      if (poolLen > 1) state.pointers.set(providerId, (index + 1) % poolLen);
 
-      const startIndex = state.pointers.get(providerId) || 0;
-      for (let offset = 0; offset < keyPool.length; offset++) {
-        const index = (startIndex + offset) % keyPool.length;
-        const entry = keyPool[index];
-        const cdKey = cooldownKey(providerId, entry.key);
-        const cooldownUntil = state.cooldowns.get(cdKey) || 0;
-        if (cooldownUntil > currentTime()) continue;
+      // Micro-staggering thông minh: cùng provider giãn 30ms chống 429 burst, khác provider giãn 10ms.
+      const staggerMs = state.lastProviderId && state.lastProviderId !== providerId ? 10 : 30;
+      state.lastProviderId = providerId;
+      const nowTime = currentTime();
+      const scheduledTime = Math.max(nowTime, state.nextDispatchTime || 0);
+      state.nextDispatchTime = scheduledTime + staggerMs;
+      const delayMs = scheduledTime - nowTime;
+      if (delayMs > 0) await wait(delayMs);
 
-        // Reserve NGAY khi chọn key (trước await): các caller song song đọc pointer
-        // sau thởi điểm này sẽ lấy key kế tiếp — tránh dồn request vào 1 key.
-        if (keyPool.length > 1) state.pointers.set(providerId, (index + 1) % keyPool.length);
+      let verdict;
+      let buildFailed = false;
+      const startedAt = currentTime();
+      state.inflight.set(cdKey, (state.inflight.get(cdKey) || 0) + 1);
 
-        // Micro-staggering (30ms): trì hoãn 30ms giữa các dispatches song song / xoay key
-        // để tránh HTTP burst spikes gây ra lỗi 429.
-        const STAGGER_MS = 30;
-        const nowTime = currentTime();
-        const scheduledTime = Math.max(nowTime, state.nextDispatchTime || 0);
-        state.nextDispatchTime = scheduledTime + STAGGER_MS;
-        const delayMs = scheduledTime - nowTime;
-        if (delayMs > 0) {
-          await wait(delayMs);
-        }
-
-        /* Nghẽn tạm thời phía provider (5xx/408/425) thì thử lại NGAY trên cùng
-         * key với backoff, tôn trọng Retry-After nếu có. Hết lượt mới hạ xuống
-         * keyFailed với cooldown ngắn để rotation sang key khác. */
-        let verdict;
-        let buildFailed = false;
+      try {
         for (let transientAttempt = 0; ; transientAttempt++) {
           try {
             ({ verdict } = await attempt({ providerId, providerConfig, providerLabel, apiKey: entry.key }));
@@ -1325,29 +1557,139 @@
           if (verdict.kind !== 'retry' || transientAttempt >= MAX_TRANSIENT_RETRIES) break;
           await wait(verdict.retryDelayMs || TRANSIENT_BACKOFF_MS * (transientAttempt + 1));
         }
-        if (buildFailed) break; // Không dựng được request -> sang provider khác.
-        if (verdict.kind === 'retry') {
-          verdict = { kind: 'keyFailed', message: verdict.message, cooldownMs: 15000 };
-        }
+      } finally {
+        const left = (state.inflight.get(cdKey) || 1) - 1;
+        if (left <= 0) state.inflight.delete(cdKey);
+        else state.inflight.set(cdKey, left);
+      }
 
-        if (verdict.kind === 'ok') {
-          state.pointers.set(providerId, keyPool.length > 1 ? (index + 1) % keyPool.length : 0);
-          return {
+      const elapsed = Math.max(0, currentTime() - startedAt);
+      if (buildFailed) {
+        recordKeyMetric(state, cdKey, { ok: false, latencyMs: elapsed, status: 'buildError', now: currentTime() });
+        state.onChange?.();
+        return { kind: 'providerFailed' };
+      }
+      if (verdict.kind === 'retry') {
+        verdict = { kind: 'keyFailed', message: verdict.message, cooldownMs: 15000 };
+      }
+
+      if (verdict.kind === 'ok') {
+        if (poolLen > 1) state.pointers.set(providerId, (index + 1) % poolLen);
+        recordKeyMetric(state, cdKey, { ok: true, latencyMs: elapsed, status: 'ok', now: currentTime() });
+        state.onChange?.();
+        return {
+          kind: 'ok',
+          outcome: {
             verdict,
             provider: providerId,
             providerLabel,
             keyMasked: entry.key ? maskKey(entry.key) : '',
-          };
+          },
+        };
+      }
+
+      errors.push(entry.key ? `${verdict.message} [${maskKey(entry.key)}]` : verdict.message);
+      recordKeyMetric(state, cdKey, { ok: false, latencyMs: elapsed, status: verdict.message, now: currentTime() });
+
+      if (verdict.kind === 'keyFailed') {
+        state.cooldowns.set(cdKey, currentTime() + (verdict.cooldownMs || 60000));
+        state.onChange?.();
+        return { kind: 'keyFailed' };
+      }
+
+      state.onChange?.();
+      return { kind: 'providerFailed' };
+    }
+
+    if (strategy === 'smart-stripe' || strategy === 'round-robin') {
+      const candidates = [];
+      const ts = currentTime();
+      for (const providerId of providerIds) {
+        const providerConfig = config.providers[providerId];
+        const providerLabel = providerLabelOf(providerId, providerConfig);
+        const keyPool = collectActivePool(config, providerId);
+        // Round-robin xoay vòng qua toàn pool bằng state.globalPointer, tránh xoay 2 lần với state.pointers.
+        const startIdx = strategy === 'round-robin' ? 0 : (state.pointers.get(providerId) || 0);
+
+        for (let offset = 0; offset < keyPool.length; offset++) {
+          const index = (startIdx + offset) % keyPool.length;
+          const entry = keyPool[index];
+          const cdKey = cooldownKey(providerId, entry.key);
+          if ((state.cooldowns.get(cdKey) || 0) > ts) continue;
+
+          const metric = state.metrics.get(cdKey);
+          const inflight = state.inflight.get(cdKey) || 0;
+          const preferredBonus = providerId === config.preferred ? 90 : 0;
+          const latencyPenalty = metric?.emaLatencyMs ? Math.min(400, metric.emaLatencyMs * 0.12) : 0;
+          const streakPenalty = (metric?.errorStreak || 0) * 450;
+          const score = preferredBonus - (inflight * 320) - latencyPenalty - streakPenalty - (offset * 4);
+
+          candidates.push({
+            providerId,
+            providerConfig,
+            providerLabel,
+            entry,
+            cdKey,
+            poolLen: keyPool.length,
+            index,
+            score,
+          });
         }
+      }
 
-        errors.push(entry.key ? `${verdict.message} [${maskKey(entry.key)}]` : verdict.message);
+      let ordered = candidates;
+      if (strategy === 'smart-stripe') {
+        ordered = [...candidates].sort((a, b) => b.score - a.score);
+      } else if (candidates.length > 1) {
+        const start = state.globalPointer % candidates.length;
+        state.globalPointer = (state.globalPointer + 1) % candidates.length;
+        ordered = [...candidates.slice(start), ...candidates.slice(0, start)];
+      }
 
-        if (verdict.kind === 'keyFailed') {
-          state.cooldowns.set(cdKey, currentTime() + (verdict.cooldownMs || 60000));
-          continue; // Key tiếp theo của cùng provider.
-        }
+      for (const slot of ordered) {
+        if (failedProviders.has(slot.providerId)) continue;
+        const step = await runSlot(slot);
+        if (step.kind === 'ok') return step.outcome;
+        if (step.kind === 'providerFailed') failedProviders.add(slot.providerId);
+      }
 
-        break; // providerFailed -> sang provider khác.
+      throw new Error(errors.length ? errors.join(' · ') : 'Tất cả provider đều thất bại');
+    }
+
+    // Chế độ failover cổ điển: ưu tiên hết provider đứng trước rồi mới sang provider kế.
+    for (const providerId of providerIds) {
+      const providerConfig = config.providers[providerId];
+      const providerLabel = providerLabelOf(providerId, providerConfig);
+      const keyPool = collectActivePool(config, providerId);
+      const startIndex = state.pointers.get(providerId) || 0;
+      const slots = [];
+      const ts = currentTime();
+
+      for (let offset = 0; offset < keyPool.length; offset++) {
+        const index = (startIndex + offset) % keyPool.length;
+        const entry = keyPool[index];
+        const cdKey = cooldownKey(providerId, entry.key);
+        if ((state.cooldowns.get(cdKey) || 0) > ts) continue;
+        slots.push({
+          providerId,
+          providerConfig,
+          providerLabel,
+          entry,
+          cdKey,
+          poolLen: keyPool.length,
+          index,
+          inflight: state.inflight.get(cdKey) || 0,
+          offset,
+        });
+      }
+
+      // Khi 1 provider có nhiều key và đang chạy nhiều batch song song, ưu tiên key rảnh trước.
+      slots.sort((a, b) => (a.inflight - b.inflight) || (a.offset - b.offset));
+
+      for (const slot of slots) {
+        const step = await runSlot(slot);
+        if (step.kind === 'ok') return step.outcome;
+        if (step.kind === 'providerFailed') break;
       }
 
       // Tránh bắn request dồn dập khi đổi provider.
@@ -1357,7 +1699,7 @@
     throw new Error(errors.length ? errors.join(' · ') : 'Tất cả provider đều thất bại');
   }
 
-  async function translateWithRotation({ config, source, context, fetchText, keyState, now, sleep }) {
+  async function translateWithRotation({ config, source, context, fetchText, keyState, now, sleep, systemOverride }) {
     const text = String(source || '').trim();
     if (!text) throw new Error('Không có nội dung cần dịch');
 
@@ -1374,6 +1716,7 @@
           source: text,
           context,
           tone: config.tone,
+          systemOverride,
         });
         const response = await fetchText(request);
         const verdict = classifyResponse({
@@ -1422,9 +1765,6 @@
           targetLanguage,
           pageOptions,
         });
-        // LLM thỉnh thoảng trả mảng JSON hỏng: retry TỐI ĐA 1 lần trên cùng key
-        // (chỉ với lỗi parse, không phải lỗi HTTP) rồi mới chuyển provider.
-        // Cờ retriedParse đặt lại mỗi attempt nên không retry vòng vô hạn.
         let retriedParse = false;
         for (;;) {
           const response = await fetchText(request);
@@ -1450,38 +1790,20 @@
       translations: outcome.verdict.translations,
       provider: outcome.provider,
       providerLabel: outcome.providerLabel,
+      keyMasked: outcome.keyMasked,
     };
   }
 
   /* ------------------------------------------------------------------
-   * Tóm tắt trang (summarize): LLM trả plain text bullet, KHÔNG phải JSON.
-   * CHỈ gemini/openai — DeepL là engine dịch thuần, không tóm tắt tự do.
+   * Tóm tắt trang (summarize): dùng prompt từ prompts.js, hỗ trợ thêm Anthropic.
    * ------------------------------------------------------------------ */
-  const SUMMARY_TARGET = { vi: 'Vietnamese', en: 'English' };
-
-  function clampSummaryBullets(maxBullets) {
-    const value = Number(maxBullets);
-    if (!Number.isFinite(value)) return 8;
-    return Math.min(15, Math.max(3, Math.round(value)));
-  }
-
-  function buildSummaryInstructions(targetName, maxBullets) {
-    return [
-      `Summarize the given page content into at most ${maxBullets} bullet points.`,
-      "Each bullet must be exactly one line starting with '- '.",
-      `Write the ENTIRE summary in ${targetName} — every single bullet, no exceptions.`,
-      'Return plain text only: no JSON, no headings, no intro or closing commentary.',
-    ].join('\n');
-  }
-
-  // Dựng request tóm tắt theo provider (pattern giống buildBatchRequest).
-  function buildSummaryRequest({ providerId, providerConfig, apiKey, text, targetLanguage, maxBullets }) {
+  function buildSummaryRequest({ providerId, providerConfig, apiKey, text, targetLanguage, maxBullets, systemOverride }) {
     const targetName = SUMMARY_TARGET[String(targetLanguage || '').toLowerCase()];
     if (!targetName) throw new Error('Ngôn ngữ đích không hỗ trợ');
     const kind = providerKind(providerId);
     if (kind === 'deepl') throw new Error('SUMMARIZE_REQUIRES_LLM');
 
-    const instructions = buildSummaryInstructions(targetName, clampSummaryBullets(maxBullets));
+    const instructions = buildSummaryInstructions(targetName, clampSummaryBullets(maxBullets), systemOverride);
     const prompt = String(text || '');
 
     if (kind === 'gemini') {
@@ -1503,6 +1825,10 @@
           safetySettings: GEMINI_SAFETY_SETTINGS,
         }),
       };
+    }
+
+    if (kind === 'anthropic') {
+      return buildAnthropicRequest({ providerConfig, apiKey, system: instructions, prompt, maxTokens: 2048, temperature: 0.1 });
     }
 
     if (kind === 'openai') {
@@ -1538,13 +1864,13 @@
 
   // Tóm tắt qua rotation key: ép config chỉ còn provider LLM (bỏ DeepL).
   // Chỉ có DeepL key -> throw 'SUMMARIZE_REQUIRES_LLM' để UI báo rõ.
-  async function summarizeWithRotation({ config, text, targetLanguage, maxBullets, fetchText, keyState, now, sleep }) {
+  async function summarizeWithRotation({ config, text, targetLanguage, maxBullets, fetchText, keyState, now, sleep, systemOverride }) {
     const content = String(text || '').trim();
     if (!content) throw new Error('Không có nội dung cần tóm tắt');
     const target = String(targetLanguage || '').toLowerCase();
     if (!SUMMARY_TARGET[target]) throw new Error('Ngôn ngữ đích không hỗ trợ');
 
-    // Mọi provider LLM đang bật (Gemini + tất cả slot OpenAI-compatible).
+    // Mọi provider LLM đang bật (Gemini + Anthropic + OpenAI/Preset + Deploy).
     const llmProviders = {};
     for (const id of providerIdsOf(config)) {
       if (providerKind(id) === 'deepl') continue;
@@ -1573,6 +1899,7 @@
           text: content,
           targetLanguage: target,
           maxBullets,
+          systemOverride,
         });
         const response = await fetchText(request);
         const verdict = classifyResponse({
@@ -1596,58 +1923,16 @@
   }
 
   /* ------------------------------------------------------------------
-   * AI Quick Solver: Giải bài tập và câu hỏi nhanh với độ chính xác cao.
+   * AI Quick Solver: Giải bài tập và câu hỏi nhanh (dùng buildQaInstructions từ prompts.js).
    * ------------------------------------------------------------------ */
-  function buildQaInstructions() {
-    return [
-      'You are a world-class exam solver and advanced reasoning AI assistant.',
-      'Your HIGHEST PRIORITY is ABSOLUTE ACCURACY and rigorous mathematical/scientific verification.',
-      '',
-      'CRITICAL REASONING & CHAIN-OF-THOUGHT INSTRUCTIONS:',
-      '1. Mathematical and scientific formatting & Rigorous Reasoning:',
-      '   - PROTOCOL PHASE 1: BLIND SOLVING PROTOCOL (Giao thức Giải Mù):',
-      '     * For multiple-choice questions, BLIND yourself to the options (A, B, C, D) initially.',
-      '     * Derive the solution from fundamental axioms, physical laws, and mathematical definitions independently without peeking at the choices.',
-      '     * STRICT ANTI-RATIONALIZATION: NEVER engage in post-hoc rationalization ("ép số" / ngụy biện gượng ép). Never invent justifications like "Theo tài liệu chuẩn..." or "Ta có thể ước lượng..." simply to force-match an available option. If your rigorous deduction yields a result, stand firmly by it.',
-      '   - PROTOCOL PHASE 2: DETERMINISTIC SYMBOLIC COMPUTATION & PYTHON CODE EXECUTION:',
-      '     * MANDATORY TOOL TRIGGERING: For ANY problem involving derivatives, improper/definite integrals, series, differential equations, matrix algebra, multi-variable probability (e.g. Poisson point process, joint density, covariance, expectations), or calculations with numbers > 2 digits, YOU MUST WRITE PYTHON CODE AND CALL THE CODE_EXECUTION TOOL. DO NOT RELY ON MENTAL CALCULATION.',
-      '     * SANDBOX BEST PRACTICES (SymPy & SciPy):',
-      '       - Always declare explicit assumptions when defining mathematical symbols (e.g. `sp.symbols("r1 r2 lam", positive=True, real=True)`) to prevent SymPy from branch-evaluating sign conditions or timing out in the cloud sandbox.',
-      '       - Use `sp.simplify()`, `sp.factor()`, or `sp.trigsimp()` to reduce expressions efficiently.',
-      '       - If symbolic integration is intractable or slow, compute numerical approximations via `scipy.integrate.quad` or `sp.N()` to double-check and match against candidate option decimals.',
-      '   - PROTOCOL PHASE 3: CONSTRAINT & DIMENSION CHECK:',
-      '     * Verify physical dimensions, units, scaling parameters (e.g. dependence on λ), and boundary/asymptotic conditions (e.g. limits as λ → 0 or λ → ∞).',
-      '   - PROTOCOL PHASE 4: OPTION MAPPING & CONCLUSION:',
-      '     * ONLY AFTER establishing your independently derived result, compare it against the options (A, B, C, D).',
-      '     * If it matches an option, select it and explain why other distractors are wrong.',
-      '     * If none match, identify the discrepancy or closest valid formulation without bending your math.',
-      '     * Parse all definitions, dimensions, indices, and conditions (e.g. degrees, stable stems, spectral sequences, equations).',
-      '     * Present formulas, variables, and equations cleanly and readably using standard Unicode symbols (e.g. ≅, ⌣, ⌢, λ, α, β, ≤, ≥, ≠, ±, ∈, ∉, ⊂, ∩, ∪, →, ∞, √, ², ³, ₁, ₂, ℝ, ℕ, ℤ, ℂ, ℓ², v.v.) or concise LaTeX enclosed in $...$ (e.g. $\\mathbb{Z}/240$, $\\pi_7^s$).',
-      '     * Never output raw unrendered LaTeX like \\cong, \\smile, \\deg, \\mathbb without $...$ delimiters.',
-      '     * Ensure all options and equations are written clearly without broken or raw code.',
-      '',
-      '2. Output Structure (strictly follow):',
-      '   - Start with your thorough reasoning under: "Giải thích chi tiết:"',
-      '   - Provide the complete, rigorous mathematical derivation, explaining WHY the correct option holds and why other options are false.',
-      '   - Conclude at the end with the final answer on its own line: "**Đáp án: [A/B/C/D] - [Tóm tắt đáp án]**" (for multiple choice) or "**Đáp án: [Kết quả chính xác ngắn gọn]**" (for direct questions).',
-      '',
-      '3. Real-time and factual verification:',
-      '   - When a question involves specific dates, historical timelines, current events, real-time facts, or complex verifiable claims you are not 100% certain about, ALWAYS use Google Search to verify the facts before finalizing the answer.',
-      '   - Never guess or extrapolate uncertain dates or facts.',
-      '4. Language & Tone:',
-      '   - Output in clear, natural Vietnamese (unless testing foreign language vocabulary/grammar).',
-      '   - Be direct, clear, objective. No greetings, conversational filler, or unnecessary preamble.'
-    ].join('\n');
-  }
-
-  function buildQaRequest({ providerId, providerConfig, apiKey, text, imageBase64, mimeType, extendedThinking, thinkingLevel, codeExecution }) {
+  function buildQaRequest({ providerId, providerConfig, apiKey, text, imageBase64, mimeType, extendedThinking, thinkingLevel, codeExecution, systemOverride }) {
     const kind = providerKind(providerId);
     if (kind === 'deepl') throw new Error('QA_REQUIRES_LLM');
-    if (imageBase64 && kind !== 'gemini' && kind !== 'deploy') {
+    if (imageBase64 && !supportsVision(providerId, providerConfig)) {
       throw new Error('IMAGE_NEEDS_VISION');
     }
 
-    const instructions = buildQaInstructions();
+    const instructions = buildQaInstructions(systemOverride);
     const prompt = String(text || '').trim() || (imageBase64 ? 'Hãy quan sát kỹ hình ảnh câu hỏi dưới đây, đọc chính xác mọi công thức toán/ký hiệu/chỉ số, suy luận từng bước giải chi tiết và đưa ra đáp án chính xác nhất.' : '');
 
     if (kind === 'gemini') {
@@ -1685,9 +1970,6 @@
         safetySettings: GEMINI_SAFETY_SETTINGS,
       };
 
-      // Kích hoạt công cụ cho Gemini:
-      // 1. code_execution: Tự động chạy mã Python tính toán tất định khi giải sâu (extended thinking) hoặc khi cấu hình codeExecution
-      // 2. google_search: Tra cứu thông tin thời gian thực / ngày tháng khi không chạy code_execution
       const useCodeExecution = (codeExecution === true || providerConfig?.codeExecution === true || isExtended) && providerConfig?.codeExecution !== false;
       if (useCodeExecution) {
         bodyPayload.tools = [{ code_execution: {} }];
@@ -1707,17 +1989,33 @@
       };
     }
 
+    if (kind === 'anthropic') {
+      return buildAnthropicRequest({
+        providerConfig,
+        apiKey,
+        system: instructions,
+        prompt,
+        image: imageBase64 ? { imageBase64, mimeType } : null,
+        maxTokens: 4096,
+        temperature: 0.1,
+        timeoutMs: 120000,
+      });
+    }
+
     if (kind === 'openai') {
-      const { url, model, format, headers } = resolveOpenAIRequest(providerConfig, apiKey);
+      const { url, model, format, headers } = imageBase64
+        ? resolveOpenAIVisionRequest(providerConfig, apiKey)
+        : resolveOpenAIRequest(providerConfig, apiKey);
       let payload;
       if (format === 'responses') {
         payload = { model, instructions, input: prompt, max_output_tokens: 1500, temperature: 0.1, store: false };
       } else if (format === 'chat') {
+        const userContent = imageBase64 ? chatUserContent(prompt, { imageBase64, mimeType }) : prompt;
         payload = {
           model,
           messages: [
             { role: 'system', content: instructions },
-            { role: 'user', content: prompt },
+            { role: 'user', content: userContent },
           ],
           temperature: 0.1,
           stream: false,
@@ -1735,8 +2033,6 @@
         system: instructions,
         prompt,
         image: imageBase64 ? { imageBase64, mimeType } : null,
-        // Giải bài: suy luận sâu nhất. Đo được ca khó tới ~280s nên cho 200s
-        // (trần background là 240s) thay vì 120s dùng cho dịch.
         mode: 'solve',
         timeoutMs: 200000,
       });
@@ -1745,12 +2041,12 @@
     throw new Error(`Provider không hỗ trợ: ${providerId}`);
   }
 
-  async function solveQuestionWithRotation({ config, text, imageBase64, mimeType, extendedThinking, thinkingLevel, codeExecution, fetchText, keyState, now, sleep }) {
+  async function solveQuestionWithRotation({ config, text, imageBase64, mimeType, extendedThinking, thinkingLevel, codeExecution, fetchText, keyState, now, sleep, systemOverride }) {
     if (!text && !imageBase64) throw new Error('Không có nội dung câu hỏi');
 
     let eligibleProviders = {};
     if (imageBase64) {
-      // Ảnh: chỉ provider đọc được ảnh (Gemini inline_data / Deploy image_url).
+      // Ảnh: chỉ provider đọc được ảnh (Gemini / Deploy / Anthropic / OpenRouter Vision).
       for (const id of visionProviderIds(config)) {
         eligibleProviders[id] = config.providers[id];
       }
@@ -1783,11 +2079,9 @@
       sleep,
       attempt: async ({ providerId, providerConfig, providerLabel, apiKey }) => {
         const currentTime = now ? now() : Date.now();
-        // Kiểm tra xem tool search có đang bị tạm ngưng do cạn quota search grounding không
         const isSearchCoolingDown = Boolean(keyState?.searchCooldownUntil && keyState.searchCooldownUntil > currentTime);
         const allowSearch = providerConfig?.googleSearch !== false && !isSearchCoolingDown;
 
-        // Nếu người dùng chủ động chọn giải sâu (extendedThinking === true), luôn tôn trọng chỉ định của người dùng
         const isThinkingCoolingDown = Boolean(keyState?.extendedThinkingCooldownUntil && keyState.extendedThinkingCooldownUntil > currentTime);
         const allowExtended = extendedThinking === true
           ? true
@@ -1807,6 +2101,7 @@
           extendedThinking: allowExtended,
           thinkingLevel,
           codeExecution,
+          systemOverride,
         });
         const response = await fetchText(request);
         let verdict = classifyResponse({
@@ -1818,14 +2113,11 @@
           retryAfterMs: response.retryAfterMs,
         });
 
-        // Nếu Gemini bị lỗi (429 Rate Limit do cạn quota Search Grounding/TPM, lỗi 400 do tools/thinking, hoặc providerFailed):
-        // Thử lại ngay các cấp độ fallback an toàn trên cùng API key trước khi đánh dấu keyFailed.
         if (verdict.kind !== 'ok' && providerKind(providerId) === 'gemini') {
           const rawErr = `${verdict.message || ''} ${response.bodyText || ''}`.toLowerCase();
           const is429 = response.status === 429 || verdict.kind === 'keyFailed' || rawErr.includes('429') || rawErr.includes('resource_exhausted');
           const isToolIssue = allowSearch && (is429 || rawErr.includes('tool') || rawErr.includes('search') || rawErr.includes('grounding') || response.status === 400);
 
-          // Cấp 1: Fallback gỡ bỏ Search Grounding (khắc phục 95% lỗi 429 Free Tier do cạn quota Grounding Search Queries)
           if (isToolIssue) {
             if (keyState) {
               keyState.searchCooldownUntil = currentTime + 60000;
@@ -1844,6 +2136,7 @@
               extendedThinking: allowExtended,
               thinkingLevel,
               codeExecution,
+              systemOverride,
             });
             const fallbackResp = await fetchText(fallbackReq);
             const fallbackVerdict = classifyResponse({
@@ -1860,8 +2153,6 @@
             verdict = fallbackVerdict;
           }
 
-          // Cấp 2: Fallback tắt Extended Thinking / hạ về Gemini 3.5 Flash Lite
-          // (khắc phục lỗi 429 do cạn TPM token của Gemini 3.8 Flash Deep Thinking)
           if (verdict.kind !== 'ok' && (allowExtended || is429)) {
             if (keyState && !extendedThinking) {
               keyState.extendedThinkingCooldownUntil = currentTime + 60000;
@@ -1879,6 +2170,7 @@
               imageBase64,
               mimeType,
               extendedThinking: false,
+              systemOverride,
             });
             const liteResp = await fetchText(liteReq);
             const liteVerdict = classifyResponse({
@@ -1895,7 +2187,6 @@
             verdict = liteVerdict;
           }
 
-          // Cấp 3: Nếu vẫn bị 429 do burst spike tạm thời (bắn request quá nhanh), chờ 1.5s rồi thử lại 1 lần với bản Lite an toàn
           if (verdict.kind !== 'ok' && (response.status === 429 || verdict.kind === 'keyFailed')) {
             const waitMs = Number(response.retryAfterMs) > 0 ? Math.min(Number(response.retryAfterMs), 3000) : 1500;
             if (sleep) {
@@ -1914,6 +2205,7 @@
               imageBase64,
               mimeType,
               extendedThinking: false,
+              systemOverride,
             });
             const retryResp = await fetchText(retryReq);
             const retryVerdict = classifyResponse({
@@ -1936,7 +2228,6 @@
     });
 
     const isFallback = Boolean(outcome.verdict?.fallbackUsed || outcome.fallbackUsed);
-    // Nhãn "3.8 Extended" chỉ đúng cho Gemini; Deploy tự mang reasoning_effort riêng.
     const geminiThinking = extendedThinking && providerKind(outcome.provider) === 'gemini';
     const finalProviderLabel = isFallback
       ? `${outcome.providerLabel} (Flash Lite Fallback)`
@@ -1950,21 +2241,17 @@
   }
 
   /* ------------------------------------------------------------------
-   * Dịch ảnh (OCR + dịch). Provider đọc được ảnh: Gemini (inline_data) và
-   * Deploy.com (image_url). Deepl/OpenAI-compatible bị bỏ qua dù đang bật.
+   * Dịch ảnh (OCR + dịch) — hỗ trợ Gemini, Deploy, Anthropic, OpenRouter Vision.
    * ------------------------------------------------------------------ */
-  const VISION_TARGET = { vi: 'Vietnamese', en: 'English' };
-
-  // Dựng request Gemini kèm ảnh inline base64 (part inline_data, snake_case
-  // theo chuẩn REST v1beta của Google).
-  function buildVisionRequest({ providerId = 'gemini', providerConfig, apiKey, mimeType, imageBase64, targetLanguage }) {
+  function buildVisionRequest({ providerId = 'gemini', providerConfig, apiKey, mimeType, imageBase64, targetLanguage, systemOverride }) {
     const targetName = VISION_TARGET[String(targetLanguage || '').toLowerCase()];
     if (!targetName) throw new Error('Ngôn ngữ đích không hỗ trợ');
 
-    const instructions = `You are an OCR + translation engine. Transcribe every visible text line in the image in reading order, then translate each line into ${targetName} naturally. Return ONLY a JSON array [{"box":[ymin,xmin,ymax,xmax],"original":"...","translated":"..."}]. "box" is the bounding box of that text line in the image: 4 integers normalized to the 0-1000 range, in ymin,xmin,ymax,xmax order. If no text found return [].`;
+    const instructions = buildVisionInstructions(targetName, systemOverride);
     const prompt = `Transcribe the text in this image with per-line bounding boxes and translate it into ${targetName}.`;
+    const kind = providerKind(providerId);
 
-    if (providerKind(providerId) === 'deploy') {
+    if (kind === 'deploy') {
       return buildDeployRequest({
         providerConfig,
         apiKey,
@@ -1973,6 +2260,37 @@
         image: { imageBase64, mimeType: mimeType || 'image/png' },
         temperature: 0.2,
       });
+    }
+
+    if (kind === 'anthropic') {
+      return buildAnthropicRequest({
+        providerConfig,
+        apiKey,
+        system: instructions,
+        prompt,
+        image: { imageBase64, mimeType: mimeType || 'image/png' },
+        maxTokens: 4096,
+        temperature: 0.2,
+      });
+    }
+
+    if (kind === 'openai') {
+      const { url, model, headers } = resolveOpenAIVisionRequest(providerConfig, apiKey);
+      return {
+        url,
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: instructions },
+            { role: 'user', content: chatUserContent(prompt, { imageBase64, mimeType: mimeType || 'image/png' }) },
+          ],
+          temperature: 0.2,
+          stream: false,
+        }),
+        openaiFormat: 'chat',
+      };
     }
 
     const rawModel = String(providerConfig?.model || PROVIDER_DEFS.gemini.defaultModel).trim();
@@ -1995,15 +2313,12 @@
             { inline_data: { mime_type: String(mimeType || 'image/png'), data: String(imageBase64 || '') } },
           ],
         }],
-        generationConfig: { temperature: 0.2 },
+        generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
         safetySettings: GEMINI_SAFETY_SETTINGS,
       }),
     };
   }
 
-  // Parse mảng [{original, translated, box?}] từ text model trả về (tái dùng
-  // parseJsonArrayText: strip fence ```json, cắt [ đầu ] cuối). Lỗi -> throw.
-  // box = [ymin,xmin,ymax,xmax] chuẩn hóa 0-1000; thiếu/sai -> null (không vẽ đè dòng đó).
   function parseVisionLines(raw, providerLabel = 'Gemini') {
     const parsed = parseJsonArrayText(raw);
     if (!parsed) throw new Error(`${providerLabel}: không parse được mảng OCR từ ảnh`);
@@ -2019,12 +2334,12 @@
       .filter(item => item.original || item.translated);
   }
 
-  // Dựng request OCR thuần (không dịch). Gemini -> inline_data, Deploy -> image_url.
-  function buildOcrVisionRequest({ providerId = 'gemini', providerConfig, apiKey, mimeType, imageBase64 }) {
-    const instructions = `You are an accurate OCR engine. Transcribe all visible text in this image accurately and in natural reading order. Preserve original line breaks, punctuation, numbers, and exact Vietnamese diacritics. Do not translate, explain, or add commentary. Return ONLY the transcribed text.`;
-    const prompt = `Transcribe all text visible in this image accurately.`;
+  function buildOcrVisionRequest({ providerId = 'gemini', providerConfig, apiKey, mimeType, imageBase64, systemOverride }) {
+    const instructions = buildOcrVisionInstructions(systemOverride);
+    const prompt = 'Transcribe all text visible in this image accurately.';
+    const kind = providerKind(providerId);
 
-    if (providerKind(providerId) === 'deploy') {
+    if (kind === 'deploy') {
       return buildDeployRequest({
         providerConfig,
         apiKey,
@@ -2033,6 +2348,37 @@
         image: { imageBase64, mimeType: mimeType || 'image/png' },
         temperature: 0.1,
       });
+    }
+
+    if (kind === 'anthropic') {
+      return buildAnthropicRequest({
+        providerConfig,
+        apiKey,
+        system: instructions,
+        prompt,
+        image: { imageBase64, mimeType: mimeType || 'image/png' },
+        maxTokens: 4096,
+        temperature: 0.1,
+      });
+    }
+
+    if (kind === 'openai') {
+      const { url, model, headers } = resolveOpenAIVisionRequest(providerConfig, apiKey);
+      return {
+        url,
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: instructions },
+            { role: 'user', content: chatUserContent(prompt, { imageBase64, mimeType: mimeType || 'image/png' }) },
+          ],
+          temperature: 0.1,
+          stream: false,
+        }),
+        openaiFormat: 'chat',
+      };
     }
 
     const rawModel = String(providerConfig?.model || PROVIDER_DEFS.gemini.defaultModel).trim();
@@ -2061,13 +2407,11 @@
     };
   }
 
-  // Parse text từ phản hồi OCR của Gemini: hỗ trợ cả plain text lẫn JSON format.
   function parseOcrVisionText(raw) {
     if (!raw || typeof raw !== 'string') return '';
     const trimmed = raw.trim();
     if (!trimmed) return '';
 
-    // Nếu Gemini trả về JSON array [{text}] hoặc ["line1", "line2"]
     const parsed = parseJsonArrayText(trimmed);
     if (Array.isArray(parsed) && parsed.length > 0) {
       return parsed
@@ -2076,20 +2420,17 @@
         .join('\n');
     }
 
-    // Gọt bỏ code block markdown nếu model có bọc ```...```
     const unfenced = trimmed.replace(/^```(?:text|json)?\s*\n?|\n?```$/gi, '').trim();
     return unfenced;
   }
 
-  // Parse dòng OCR phục vụ tương thích cũ.
   function parseOcrVisionLines(raw) {
     const text = parseOcrVisionText(raw);
     if (!text) return [];
     return text.split('\n').map(line => line.trim()).filter(Boolean).map(line => ({ text: line }));
   }
 
-  // OCR thuần (không dịch) qua rotation key. Chỉ còn các provider đọc được ảnh.
-  async function ocrVisionWithRotation({ config, mimeType, imageBase64, fetchText, keyState, now, sleep }) {
+  async function ocrVisionWithRotation({ config, mimeType, imageBase64, fetchText, keyState, now, sleep, systemOverride }) {
     if (!imageBase64) throw new Error('Không có dữ liệu ảnh');
 
     const visionIds = visionProviderIds(config);
@@ -2108,7 +2449,7 @@
       now,
       sleep,
       attempt: async ({ providerId, providerConfig, providerLabel, apiKey }) => {
-        const request = buildOcrVisionRequest({ providerId, providerConfig, apiKey, mimeType, imageBase64 });
+        const request = buildOcrVisionRequest({ providerId, providerConfig, apiKey, mimeType, imageBase64, systemOverride });
         const response = await fetchText(request);
         const verdict = classifyResponse({
           providerId,
@@ -2135,8 +2476,7 @@
     };
   }
 
-  // Rotation key giống translateBatchWithRotation nhưng chỉ còn provider đọc ảnh.
-  async function translateVisionWithRotation({ config, mimeType, imageBase64, targetLanguage, fetchText, keyState, now, sleep }) {
+  async function translateVisionWithRotation({ config, mimeType, imageBase64, targetLanguage, fetchText, keyState, now, sleep, systemOverride }) {
     if (!imageBase64) throw new Error('Không có dữ liệu ảnh');
     const target = String(targetLanguage || 'vi').toLowerCase();
     if (!VISION_TARGET[target]) throw new Error('Ngôn ngữ đích không hỗ trợ');
@@ -2157,7 +2497,7 @@
       now,
       sleep,
       attempt: async ({ providerId, providerConfig, providerLabel, apiKey }) => {
-        const request = buildVisionRequest({ providerId, providerConfig, apiKey, mimeType, imageBase64, targetLanguage: target });
+        const request = buildVisionRequest({ providerId, providerConfig, apiKey, mimeType, imageBase64, targetLanguage: target, systemOverride });
         const response = await fetchText(request);
         const verdict = classifyResponse({
           providerId,
@@ -2181,8 +2521,14 @@
 
   const api = {
     CONFIG_STORAGE_KEY,
+    SYSTEM_PROMPT_OVERRIDE_KEY,
+    PROMPT_STUDIO_TASKS,
     PROVIDER_ORDER,
+    PRESET_ORDER,
+    ROUTING_STRATEGIES,
     PROVIDER_DEFS,
+    PROVIDER_PRESETS,
+    BUILTIN_ORIGINS,
     TONES,
     DEPLOY_API_BASE,
     DEPLOY_DEFAULT_REASONING,
@@ -2190,10 +2536,13 @@
     DEPLOY_REASONING_EFFORTS,
     normalizeConfig,
     normalizeKeyList,
+    activeKeysOf,
     parseKeysInput,
     detectProviderForKey,
+    detectPresetForKey,
     keyFormatWarning,
     emptyProviderConfig,
+    isPresetProvider,
     isCustomProvider,
     providerKind,
     providerDefOf,
@@ -2203,26 +2552,32 @@
     MAX_CUSTOM_PROVIDERS,
     orderedProviderIds,
     usableProviders,
+    supportsVision,
     visionProviderIds,
     maskKey,
     deeplUsageEndpoint,
     buildNativeInstructions,
     humanizeCasual,
     buildRequest,
+    buildAnthropicRequest,
     classifyResponse,
     PAGE_STYLES,
     PAGE_DIALECTS,
     normalizePageOptions,
+    normalizeSystemPromptOverrides,
     buildBatchInstructions,
     buildBatchRequest,
     classifyBatchResponse,
     translateWithRotation,
     translateBatchWithRotation,
+    buildSummaryInstructions,
     buildSummaryRequest,
     summarizeWithRotation,
+    buildVisionInstructions,
     buildVisionRequest,
     parseVisionLines,
     translateVisionWithRotation,
+    buildOcrVisionInstructions,
     buildOcrVisionRequest,
     parseOcrVisionText,
     parseOcrVisionLines,
@@ -2231,6 +2586,11 @@
     buildQaRequest,
     solveQuestionWithRotation,
     createKeyState,
+    cooldownKey,
+    keyHashId,
+    recordKeyMetric,
+    exportKeyHealthSnapshot,
+    hydrateKeyState,
     parseRetryAfter,
   };
 
