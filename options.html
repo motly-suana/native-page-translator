@@ -3,231 +3,404 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Native Page Translator — Cài đặt</title>
+  <meta name="color-scheme" content="light dark">
+  <title>Native Page Translator — Command Center</title>
   <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="dashboard.css">
 </head>
-<body class="options-page">
-  <main>
-    <header class="brand">
-      <span id="brandLogo" class="brand-logo-slot"></span>
-      <div class="brand-text">
-        <h1>Native Translator</h1>
-        <span class="brand-sub">Nhiều API key · DeepL · Gemini · Deploy · OpenAI-compatible</span>
+<body class="options-page dashboard-body">
+  <div class="dash-shell">
+    <!-- ================= Sidebar ================= -->
+    <aside class="dash-sidebar">
+      <div class="dash-brand">
+        <span id="brandLogo" class="brand-logo-slot"></span>
+        <div>
+          <h1 class="dash-brand-title">Native Translator</h1>
+          <span class="dash-brand-sub">Command Center · Multi-Key Engine</span>
+        </div>
+        <span id="versionPill" class="version-pill">v—</span>
       </div>
-      <span id="versionPill" class="version-pill">v—</span>
-    </header>
 
-    <!-- Thanh điều hướng + lưu bám dính đầu trang: bản cũ xếp 8 mục không liên
-         quan vào một cột dài ~2000px với nút Lưu nằm tận đáy. -->
-    <div class="options-bar">
-      <nav class="tabs tabs-wide" role="tablist" aria-label="Nhóm cài đặt">
-        <button class="tab" role="tab" type="button" data-tab="page" aria-selected="true" aria-controls="tab-page" id="tabbtn-page"><i class="ico" data-icon="page" data-icon-size="15"></i>Dịch trang</button>
-        <button class="tab" role="tab" type="button" data-tab="input" aria-selected="false" aria-controls="tab-input" id="tabbtn-input"><i class="ico" data-icon="wand" data-icon-size="15"></i>Nút EN</button>
-        <button class="tab" role="tab" type="button" data-tab="api" aria-selected="false" aria-controls="tab-api" id="tabbtn-api"><i class="ico" data-icon="key" data-icon-size="15"></i>API &amp; key</button>
-        <button class="tab" role="tab" type="button" data-tab="terms" aria-selected="false" aria-controls="tab-terms" id="tabbtn-terms"><i class="ico" data-icon="book" data-icon-size="15"></i>Template &amp; glossary</button>
-        <button class="tab" role="tab" type="button" data-tab="misc" aria-selected="false" aria-controls="tab-misc" id="tabbtn-misc"><i class="ico" data-icon="sliders" data-icon-size="15"></i>Khác</button>
+      <nav id="sidebarNav" class="dash-nav" role="tablist" aria-orientation="vertical" aria-label="Nhóm điều khiển">
+        <button class="tab" role="tab" type="button" data-tab="api" aria-selected="true" tabindex="0" id="tabbtn-api"><i class="ico" data-icon="cpu" data-icon-size="16"></i>API &amp; Điều phối Key</button>
+        <button class="tab" role="tab" type="button" data-tab="page" aria-selected="false" tabindex="-1" id="tabbtn-page"><i class="ico" data-icon="page" data-icon-size="16"></i>Dịch trang</button>
+        <button class="tab" role="tab" type="button" data-tab="terms" aria-selected="false" tabindex="-1" id="tabbtn-terms"><i class="ico" data-icon="terminal" data-icon-size="16"></i>Prompt Studio &amp; Thuật ngữ</button>
+        <button class="tab" role="tab" type="button" data-tab="input" aria-selected="false" tabindex="-1" id="tabbtn-input"><i class="ico" data-icon="wand" data-icon-size="16"></i>Viết câu ✨ EN</button>
+        <button class="tab" role="tab" type="button" data-tab="misc" aria-selected="false" tabindex="-1" id="tabbtn-misc"><i class="ico" data-icon="sliders" data-icon-size="16"></i>Giao diện, Cache &amp; Dữ liệu</button>
       </nav>
-      <div class="save-row">
-        <span id="dirtyPill" class="pill pill-muted" hidden>Có thay đổi chưa lưu</span>
-        <button id="save" class="primary save-button" type="button"><i class="ico" data-icon="save"></i>Lưu cài đặt</button>
+
+      <div class="dash-sidebar-foot">
+        <div class="dash-sidebar-stat">
+          <span>Chiến lược</span>
+          <strong id="sidebarStrategy">—</strong>
+        </div>
+        <div class="dash-sidebar-stat">
+          <span>Key hoạt động</span>
+          <strong id="sidebarKeyCount">0</strong>
+        </div>
+        <div class="dash-sidebar-stat">
+          <span>Trạng thái pool</span>
+          <strong id="sidebarHealth">—</strong>
+        </div>
       </div>
-      <p id="status" role="status" aria-live="polite"></p>
+    </aside>
+
+    <!-- ================= Main Workspace ================= -->
+    <div class="dashboard-stage">
+      <header class="dash-topbar">
+        <div class="dash-heading">
+          <h2 id="dashSectionTitle">API &amp; Điều phối Multi-Key</h2>
+          <p id="dashSectionSub">Quản lý 16+ nhà cung cấp AI, cân bằng tải theo độ trễ và giám sát sức khỏe từng API key</p>
+        </div>
+        <div class="dash-actions">
+          <span id="dirtyPill" class="pill pill-muted" hidden>Có thay đổi chưa lưu</span>
+          <button id="testAllKeys" type="button"><i class="ico" data-icon="activity" data-icon-size="14"></i>Test tất cả Key</button>
+          <button id="save" class="primary" type="button"><i class="ico" data-icon="save" data-icon-size="14"></i>Lưu cài đặt</button>
+        </div>
+        <p id="status" role="status" aria-live="polite"></p>
+      </header>
+
+      <main class="dash-content">
+        <!-- ================= Tab 1: API & Điều phối Key ================= -->
+        <div id="tab-api" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-api">
+          <div class="kpi-grid" aria-label="Tổng quan pool API key">
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Tổng Key Pool</span><i class="ico" data-icon="key" data-icon-size="15"></i></div>
+              <div class="kpi-value" id="kpiTotalKeys">0</div>
+              <div class="kpi-sub" id="kpiTotalSub">0 đang bật · 0 đang tắt</div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Key Sẵn sàng</span><i class="ico" data-icon="shield-check" data-icon-size="15"></i></div>
+              <div class="kpi-value" id="kpiHealthKeys">0</div>
+              <div class="kpi-sub" id="kpiHealthSub">0 cooldown</div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Độ trễ TB Pool</span><i class="ico" data-icon="clock" data-icon-size="15"></i></div>
+              <div class="kpi-value" id="kpiAvgLatency">—</div>
+              <div class="kpi-sub" id="kpiThroughputSub">0 thành công · 0 lỗi</div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Chiến lược &amp; Cache</span><i class="ico" data-icon="database" data-icon-size="15"></i></div>
+              <div class="kpi-value" id="kpiStrategy">Smart Stripe</div>
+              <div class="kpi-sub" id="kpiCacheSub">— mục đã nhớ</div>
+            </article>
+          </div>
+
+          <section class="dash-card">
+            <h3><i class="ico" data-icon="flame" data-icon-size="15"></i>Chiến lược Điều phối Key &amp; Engine Ưu tiên</h3>
+            <div class="routing-grid" role="radiogroup" aria-label="Chiến lược chia tải key">
+              <label class="routing-option">
+                <input type="radio" name="routingStrategy" value="smart-stripe">
+                <span class="routing-title"><i class="ico" data-icon="activity" data-icon-size="14"></i>Smart Stripe (Khuyên dùng)</span>
+                <span class="routing-desc">Chấm điểm sức khỏe từng key theo độ trễ EMA, số luồng đang chạy và chuỗi lỗi — dồn batch về các key nhanh nhất.</span>
+              </label>
+              <label class="routing-option">
+                <input type="radio" name="routingStrategy" value="round-robin">
+                <span class="routing-title"><i class="ico" data-icon="refresh" data-icon-size="14"></i>Round-Robin Đều tải</span>
+                <span class="routing-desc">Xoay con trỏ đều qua mọi key đang bật để chia đều RPM/TPM khi dùng nhiều key free cùng loại.</span>
+              </label>
+              <label class="routing-option">
+                <input type="radio" name="routingStrategy" value="failover">
+                <span class="routing-title"><i class="ico" data-icon="shield" data-icon-size="14"></i>Failover Tuần tự</span>
+                <span class="routing-desc">Ưu tiên tối đa Key #1 để tận dụng prompt cache của provider; chỉ chuyển key kế khi gặp 429/401/lỗi.</span>
+              </label>
+            </div>
+
+            <div class="split-2col">
+              <div>
+                <label for="preferred" class="small-label">Provider ưu tiên chính</label>
+                <select id="preferred" aria-label="Provider ưu tiên"></select>
+                <p class="note">Khi dịch, extension ưu tiên provider này trước; hết/lỗi toàn bộ key mới xoay sang provider dự phòng tiếp theo.</p>
+              </div>
+              <div>
+                <div class="section-title">
+                  <label class="small-label" style="margin:0">Quota DeepL</label>
+                  <button id="refreshDeeplUsage" type="button" class="link-button"><i class="ico" data-icon="refresh" data-icon-size="13"></i>Làm mới quota</button>
+                </div>
+                <div id="deeplUsage"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="dash-card dropzone-card">
+            <div class="dropzone-head">
+              <h3 style="margin:0"><i class="ico" data-icon="zap" data-icon-size="15"></i>Universal Smart Key Dropzone — Dán hàng loạt 1 lượt</h3>
+              <button id="testApi" type="button"><i class="ico" data-icon="zap" data-icon-size="13"></i>Test dịch câu mẫu</button>
+            </div>
+            <textarea id="universalKeyInput" rows="3" spellcheck="false" placeholder="Dán trộn nhiều key một lượt: sk-ant-... (Claude), AIza... (Gemini), gsk_... (Groq), sk-or-... (OpenRouter), csk-... (Cerebras), xai-... (Grok), pplx-... (Perplexity), uuid:fx (DeepL)...&#10;Nhận cả định dạng JSON, .env (API_KEY=...), hay 'key (tên nhãn)' — tự tạo &amp; bật provider nếu chưa có."></textarea>
+            <div class="dropzone-foot">
+              <div id="universalKeyHint" class="key-hint">Chưa có key nào trong ô dán nhanh.</div>
+              <button id="universalAddBtn" class="primary" type="button"><i class="ico" data-icon="plus" data-icon-size="14"></i>Tự nhận diện &amp; Nạp vào Pool</button>
+            </div>
+          </section>
+
+          <section class="dash-card">
+            <div class="section-title">
+              <h3><i class="ico" data-icon="grid" data-icon-size="15"></i>Thêm nhanh Nhà cung cấp AI (12 Preset + Custom)</h3>
+              <button id="addCustomProvider" type="button"><i class="ico" data-icon="plus" data-icon-size="14"></i>Thêm API tùy chỉnh</button>
+            </div>
+            <div id="presetBar" class="preset-bar"></div>
+          </section>
+
+          <section class="dash-card">
+            <div class="provider-toolbar">
+              <div class="search-box">
+                <i class="ico search-ico" data-icon="search" data-icon-size="14"></i>
+                <input id="providerSearch" type="search" spellcheck="false" placeholder="Tìm provider, model hoặc nhãn…" aria-label="Tìm provider">
+              </div>
+              <div class="filter-pills" role="group" aria-label="Lọc provider">
+                <button class="filter-pill" type="button" data-filter="all" aria-pressed="true">Tất cả</button>
+                <button class="filter-pill" type="button" data-filter="active" aria-pressed="false">Có key</button>
+                <button class="filter-pill" type="button" data-filter="vision" aria-pressed="false">Hỗ trợ ảnh (Vision)</button>
+                <button class="filter-pill" type="button" data-filter="issue" aria-pressed="false">Đang lỗi / Cooldown</button>
+              </div>
+            </div>
+
+            <div class="provider-grid-wrap" style="margin-top:14px">
+              <div id="providers" class="dash-provider-grid"></div>
+            </div>
+            <p class="note" style="margin-top:12px"><i class="ico" data-icon="shield" data-icon-size="13"></i>Toàn bộ API key lưu cục bộ trong <code>chrome.storage.local</code>; chỉ gửi thẳng tới endpoint của provider được bật.</p>
+          </section>
+        </div>
+
+        <!-- ================= Tab 2: Dịch trang ================= -->
+        <div id="tab-page" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-page" hidden>
+          <div class="split-2col">
+            <section class="dash-card">
+              <h3><i class="ico" data-icon="page" data-icon-size="15"></i>Hành vi dịch trang</h3>
+              <label class="check"><input id="pageUseProvider" type="checkbox"> Dịch cả trang bằng API riêng (tốn quota provider đã bật)</label>
+              <label class="check"><input id="pageFreeFallback" type="checkbox"> Fallback miễn phí khi provider riêng lỗi (Google/MyMemory — gửi bên thứ ba)</label>
+              <label class="check"><input id="selectionTranslate" type="checkbox"> Dịch đoạn bôi đen (hiện nút nổi khi chọn chữ)</label>
+              <label class="small-label" for="siteBlacklist">Không dịch trên các site (mỗi dòng 1 domain)</label>
+              <textarea id="siteBlacklist" rows="3" spellcheck="false" placeholder="reddit.com&#10;x.com"></textarea>
+            </section>
+
+            <section class="dash-card">
+              <h3><i class="ico" data-icon="sparkles" data-icon-size="15"></i>Hiển thị &amp; Văn phong (Live Preview)</h3>
+              <label for="pageDisplayMode" class="small-label">Chế độ hiển thị</label>
+              <select id="pageDisplayMode">
+                <option value="replace">Chỉ hiện bản dịch</option>
+                <option value="bilingual">Song ngữ (gốc + dịch)</option>
+              </select>
+              <label for="pageStyle" class="small-label">Văn phong bản dịch</label>
+              <select id="pageStyle">
+                <option value="natural">Tự nhiên</option>
+                <option value="casual">Trò chuyện thân mật</option>
+                <option value="work-email">Email công việc</option>
+                <option value="game-chat">Chat game</option>
+                <option value="genz">Văn phong Gen Z</option>
+                <option value="formal">Lịch sự, trang trọng</option>
+                <option value="technical">Kỹ thuật / Công nghệ</option>
+                <option value="academic">Học thuật / Nghiên cứu</option>
+              </select>
+              <label for="pageDialect" class="small-label">Phương ngữ (khi đích là tiếng Anh)</label>
+              <select id="pageDialect">
+                <option value="us">Tiếng Anh Mỹ</option>
+                <option value="uk">Tiếng Anh Anh</option>
+              </select>
+              <label for="pageTranslateMode" class="small-label">Chế độ dịch</label>
+              <select id="pageTranslateMode">
+                <option value="natural">Dịch tự nhiên</option>
+                <option value="literal">Dịch sát chữ</option>
+              </select>
+              <label class="check"><input id="pageGrammarFix" type="checkbox"> Sửa ngữ pháp sau khi dịch</label>
+            </section>
+          </div>
+
+          <section class="dash-card preview-card">
+            <h3><i class="ico" data-icon="eye" data-icon-size="15"></i>Xem trước văn phong bản dịch thực tế</h3>
+            <div class="preview-meta" id="pagePreviewMeta"></div>
+            <div class="preview-sample-box">
+              <div class="preview-source">Gốc: "Deploy the zero-downtime worker pool before the rate limiter kicks in."</div>
+              <div id="pagePreviewOutput"></div>
+            </div>
+            <p class="note">Văn phong và Prompt Studio chỉ áp dụng với các model LLM (Gemini, Claude, OpenAI, Groq, OpenRouter, DeepSeek…); DeepL và Google Free tự bỏ qua.</p>
+          </section>
+
+          <div class="split-2col">
+            <section class="dash-card">
+              <h3><i class="ico" data-icon="gauge" data-icon-size="15"></i>Nội dung bỏ qua &amp; Hiệu năng</h3>
+              <label class="check"><input id="pageSkipCode" type="checkbox"> Không dịch code (code block, editor)</label>
+              <label class="check"><input id="pageSkipUsernames" type="checkbox"> Không dịch username/handle</label>
+              <p class="note">Nhận diện theo selector phổ biến (username/nickname, @abc, u/abc).</p>
+              <label class="check"><input id="pageKeepProperNouns" type="checkbox"> Giữ nguyên tên riêng</label>
+              <label class="check"><input id="pageDynamicTranslate" type="checkbox"> Tự dịch nội dung tải động (SPA, cuộn trang)</label>
+              <label class="check"><input id="pageLazyTranslate" type="checkbox"> Dịch lướt theo khung nhìn (tiết kiệm quota trang dài)</label>
+            </section>
+
+            <section class="dash-card">
+              <h3><i class="ico" data-icon="doc" data-icon-size="15"></i>Trang tài liệu kỹ thuật</h3>
+              <label for="docMode" class="small-label">Chế độ Docs</label>
+              <select id="docMode">
+                <option value="auto">Tự động nhận diện</option>
+                <option value="on">Luôn bật</option>
+                <option value="off">Tắt</option>
+              </select>
+              <p class="note">Giữ nguyên ký hiệu code, biến, lệnh CLI và thuật ngữ kỹ thuật khi dịch tài liệu lập trình.</p>
+            </section>
+          </div>
+        </div>
+
+        <!-- ================= Tab 3: Prompt Studio & Thuật ngữ ================= -->
+        <div id="tab-terms" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-terms" hidden>
+          <section class="dash-card">
+            <div class="section-title">
+              <h3><i class="ico" data-icon="terminal" data-icon-size="15"></i>Prompt Studio — Tùy biến System Prompt lõi theo tác vụ</h3>
+              <button id="studioResetTask" type="button" class="link-button"><i class="ico" data-icon="reset" data-icon-size="13"></i>Khôi phục mặc định tác vụ này</button>
+            </div>
+            <div class="split-2col">
+              <div>
+                <label for="studioTask" class="small-label">Chọn tác vụ AI</label>
+                <select id="studioTask">
+                  <option value="batch">Dịch trang web hàng loạt (Batch)</option>
+                  <option value="native">Viết câu ✨ EN bản địa (Native)</option>
+                  <option value="summary">Tóm tắt nội dung trang (Summary)</option>
+                  <option value="qa">Giải đáp / Quick Solver (QA)</option>
+                  <option value="vision">Dịch chữ trong ảnh (Vision)</option>
+                  <option value="ocr">Quét chữ màn hình (OCR)</option>
+                </select>
+                <label for="studioOverrideInput" class="small-label">Chỉ thị System Override riêng (tối đa 2000 ký tự)</label>
+                <textarea id="studioOverrideInput" rows="6" maxlength="2000" spellcheck="false" placeholder="Ví dụ cho Dịch trang: Ưu tiên cách diễn đạt báo chí công nghệ Việt Nam; giữ nguyên từ khóa Kubernetes, Docker, WebSocket..."></textarea>
+                <p class="note">Chỉ thị ở đây được đặt trong khung bảo vệ chống prompt-injection ở lớp system, tự động vô hiệu cache cũ ngay sau khi bấm Lưu.</p>
+              </div>
+              <div>
+                <label class="small-label" for="studioPreview">System Prompt thực tế sẽ gửi tới LLM</label>
+                <pre id="studioPreview" class="studio-preview-pre"></pre>
+              </div>
+            </div>
+          </section>
+
+          <div class="split-2col">
+            <section class="dash-card">
+              <div class="section-title">
+                <h3><i class="ico" data-icon="layers" data-icon-size="15"></i>Prompt Templates</h3>
+              </div>
+              <div id="templateList" class="key-list"></div>
+              <label class="small-label" for="tplName">Tên template</label>
+              <input id="tplName" type="text" spellcheck="false" placeholder="Ví dụ: Văn học">
+              <label class="small-label" for="tplPrompt">Prompt hướng dẫn dịch</label>
+              <textarea id="tplPrompt" rows="3" spellcheck="false" placeholder="Ví dụ: Dịch theo phong cách văn học, giàu hình ảnh…"></textarea>
+              <div class="row two action-row">
+                <button id="tplSave" class="primary" type="button"><i class="ico" data-icon="save" data-icon-size="14"></i>Lưu template</button>
+                <button id="tplCancel" type="button" hidden><i class="ico" data-icon="close" data-icon-size="14"></i>Huỷ sửa</button>
+              </div>
+            </section>
+
+            <section class="dash-card">
+              <div class="section-title">
+                <h3><i class="ico" data-icon="book" data-icon-size="15"></i>Glossary thuật ngữ</h3>
+                <span id="glossaryCount" class="badge">0 từ</span>
+              </div>
+              <div class="search-box" style="max-width:none;margin-bottom:8px">
+                <i class="ico search-ico" data-icon="search" data-icon-size="14"></i>
+                <input id="glossarySearch" type="search" spellcheck="false" placeholder="Lọc nhanh thuật ngữ trong glossary…" aria-label="Tìm thuật ngữ">
+              </div>
+              <div id="glossaryList" class="key-list"></div>
+              <div class="glossary-add-row">
+                <input id="glossarySource" type="text" spellcheck="false" placeholder="Thuật ngữ gốc (source)" aria-label="Thuật ngữ gốc">
+                <input id="glossaryTarget" type="text" spellcheck="false" placeholder="Bản dịch cố định (target)" aria-label="Bản dịch cố định">
+                <button id="glossaryAdd" type="button"><i class="ico" data-icon="plus" data-icon-size="14"></i>Thêm</button>
+              </div>
+              <div class="row three action-row">
+                <button id="glossaryImport" type="button"><i class="ico" data-icon="upload" data-icon-size="14"></i>Import file…</button>
+                <button id="glossaryExportJson" type="button"><i class="ico" data-icon="download" data-icon-size="14"></i>Xuất JSON</button>
+                <button id="glossaryExportCsv" type="button"><i class="ico" data-icon="download" data-icon-size="14"></i>Xuất CSV</button>
+              </div>
+              <input id="glossaryFile" type="file" accept=".json,.csv,.tsv,.txt" hidden>
+              <p class="note">Import hỗ trợ .json / .csv / .tsv / .txt ("gốc =&gt; dịch"). Trùng source tự gộp.</p>
+            </section>
+          </div>
+        </div>
+
+        <!-- ================= Tab 4: Viết câu ✨ EN ================= -->
+        <div id="tab-input" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-input" hidden>
+          <section class="dash-card">
+            <h3><i class="ico" data-icon="wand" data-icon-size="15"></i>Nút ✨ EN cạnh ô nhập liệu</h3>
+            <label class="check"><input id="inputHelper" type="checkbox"> Hiện nút ✨ EN cạnh ô nhập liệu</label>
+            <div class="split-2col">
+              <div>
+                <label for="defaultMode" class="small-label">Nút EN mặc định dùng</label>
+                <select id="defaultMode">
+                  <option value="native">API riêng — tự nhiên (DeepL/Gemini/Claude/OpenAI)</option>
+                  <option value="quick">Free fallback — nhanh</option>
+                </select>
+              </div>
+              <div>
+                <label for="tone" class="small-label">Phong cách viết câu bản địa</label>
+                <select id="tone">
+                  <option value="natural">Tự nhiên — bám đúng văn phong gốc</option>
+                  <option value="professional">Trang trọng — email, công việc</option>
+                  <option value="casual">Thân mật — chat, bạn bè</option>
+                  <option value="technical">Kỹ thuật — issue GitHub, code review</option>
+                </select>
+              </div>
+            </div>
+            <label class="check"><input id="fallbackQuick" type="checkbox"> Tự dịch miễn phí khi API riêng lỗi</label>
+            <label class="check"><input id="useContext" type="checkbox"> Dùng ngữ cảnh xung quanh ô nhập liệu</label>
+            <p class="note">Phím tắt mặc định: <code>Alt+Shift+E</code> (API riêng) · <code>Alt+Shift+G</code> (miễn phí) · <code>Alt+V</code> / <code>Alt+E</code> / <code>Alt+O</code> · <code>Alt+Shift+S</code> (OCR). Đổi tại <code>chrome://extensions/shortcuts</code>.</p>
+          </section>
+        </div>
+
+        <!-- ================= Tab 5: Giao diện, Cache & Dữ liệu ================= -->
+        <div id="tab-misc" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-misc" hidden>
+          <div class="split-2col">
+            <section class="dash-card">
+              <h3><i class="ico" data-icon="moon" data-icon-size="15"></i>Giao diện</h3>
+              <label for="uiTheme" class="small-label">Bảng màu Dashboard &amp; Popup</label>
+              <select id="uiTheme">
+                <option value="auto">Tự động theo hệ thống</option>
+                <option value="dark">Luôn tối</option>
+                <option value="light">Luôn sáng</option>
+              </select>
+            </section>
+
+            <section class="dash-card">
+              <h3><i class="ico" data-icon="volume" data-icon-size="15"></i>Đọc bản dịch (TTS)</h3>
+              <label class="check"><input id="ttsEnabled" type="checkbox"> Bật nút đọc bản dịch bằng giọng nói</label>
+              <label class="small-label" for="ttsRate">Tốc độ đọc: <span id="ttsRateValue">1</span>x</label>
+              <input id="ttsRate" type="range" min="0.5" max="2" step="0.25" value="1">
+            </section>
+          </div>
+
+          <section class="dash-card">
+            <div class="section-title">
+              <h3><i class="ico" data-icon="database" data-icon-size="15"></i>Cache bản dịch dùng chung</h3>
+              <span id="cacheCount" class="badge">— mục</span>
+            </div>
+            <label class="check"><input id="translationCache" type="checkbox"> Nhớ bản dịch đã có (dùng chung mọi tab, sống qua lần khởi động lại)</label>
+            <p class="note">Phần đoạn gốc chỉ lưu dạng mã băm, nhưng <strong>bản dịch được lưu nguyên văn</strong> trong bộ nhớ extension. Tab ẩn danh không bao giờ được ghi vào cache.</p>
+            <div class="row two action-row">
+              <button id="cacheClear" class="danger-button" type="button"><i class="ico" data-icon="trash" data-icon-size="14"></i>Xoá cache bản dịch</button>
+            </div>
+          </section>
+
+          <section class="dash-card">
+            <h3><i class="ico" data-icon="shield" data-icon-size="15"></i>Sao lưu &amp; Khôi phục</h3>
+            <p class="note">Xuất toàn bộ cài đặt (kèm Prompt Studio, glossary, template, blacklist). <strong>API key không nằm trong file xuất</strong>.</p>
+            <div class="row three action-row">
+              <button id="settingsExport" type="button"><i class="ico" data-icon="download" data-icon-size="14"></i>Xuất cài đặt</button>
+              <button id="settingsImport" type="button"><i class="ico" data-icon="upload" data-icon-size="14"></i>Nhập cài đặt…</button>
+              <button id="settingsReset" class="danger-button" type="button"><i class="ico" data-icon="reset" data-icon-size="14"></i>Về mặc định</button>
+            </div>
+            <input id="settingsFile" type="file" accept=".json" hidden>
+          </section>
+        </div>
+      </main>
     </div>
+  </div>
 
-    <!-- ================= Dịch trang ================= -->
-    <div id="tab-page" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-page">
-      <section>
-        <h2><i class="ico" data-icon="page" data-icon-size="15"></i>Hành vi dịch trang</h2>
-        <label class="check"><input id="pageUseProvider" type="checkbox"> Dịch cả trang bằng API riêng (tốn quota DeepL/Gemini/Deploy)</label>
-        <label class="check"><input id="pageFreeFallback" type="checkbox"> Fallback miễn phí khi provider riêng lỗi (Google/MyMemory — nội dung gửi bên thứ ba)</label>
-        <label class="check"><input id="selectionTranslate" type="checkbox"> Dịch đoạn bôi đen (hiện nút nổi khi chọn chữ)</label>
-        <label class="small-label" for="siteBlacklist">Không dịch trên các site (mỗi dòng 1 domain)</label>
-        <textarea id="siteBlacklist" rows="3" spellcheck="false" placeholder="reddit.com&#10;x.com"></textarea>
-      </section>
+  <!-- Native accessible confirmation modal (Modern Web Guidance dialog) -->
+  <dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmDesc">
+    <h3 id="confirmTitle" class="confirm-title"><i class="ico" data-icon="alert" data-icon-size="17"></i><span>Xác nhận thao tác</span></h3>
+    <p id="confirmDesc" class="confirm-desc"></p>
+    <form method="dialog" class="confirm-actions">
+      <button type="submit" value="cancel" autofocus>Huỷ</button>
+      <button id="confirmOkBtn" type="submit" value="confirm" class="danger-button">Xác nhận</button>
+    </form>
+  </dialog>
 
-      <section>
-        <h2><i class="ico" data-icon="sparkles" data-icon-size="15"></i>Hiển thị &amp; văn phong</h2>
-        <label for="pageDisplayMode" class="small-label">Chế độ hiển thị</label>
-        <select id="pageDisplayMode">
-          <option value="replace">Chỉ hiện bản dịch</option>
-          <option value="bilingual">Song ngữ (gốc + dịch)</option>
-        </select>
-        <label for="pageStyle" class="small-label">Văn phong bản dịch</label>
-        <select id="pageStyle">
-          <option value="natural">Tự nhiên</option>
-          <option value="casual">Trò chuyện thân mật</option>
-          <option value="work-email">Email công việc</option>
-          <option value="game-chat">Chat game</option>
-          <option value="genz">Văn phong Gen Z</option>
-          <option value="formal">Lịch sự, trang trọng</option>
-        </select>
-        <label for="pageDialect" class="small-label">Phương ngữ</label>
-        <select id="pageDialect">
-          <option value="us">Tiếng Anh Mỹ</option>
-          <option value="uk">Tiếng Anh Anh</option>
-        </select>
-        <p class="note">Phương ngữ chỉ ảnh hưởng khi dịch sang tiếng Anh.</p>
-        <label for="pageTranslateMode" class="small-label">Chế độ dịch</label>
-        <select id="pageTranslateMode">
-          <option value="natural">Dịch tự nhiên</option>
-          <option value="literal">Dịch sát chữ</option>
-        </select>
-        <label class="check"><input id="pageGrammarFix" type="checkbox"> Sửa ngữ pháp sau khi dịch</label>
-        <p class="note">Văn phong chỉ áp dụng với Gemini/Deploy/OpenAI — DeepL/Google free bỏ qua.</p>
-      </section>
-
-      <section>
-        <h2><i class="ico" data-icon="gauge" data-icon-size="15"></i>Nội dung bỏ qua &amp; hiệu năng</h2>
-        <label class="check"><input id="pageSkipCode" type="checkbox"> Không dịch code (code block, editor)</label>
-        <label class="check"><input id="pageSkipUsernames" type="checkbox"> Không dịch username/handle</label>
-        <p class="note">Nhận diện theo selector phổ biến (class chứa username/nickname, handle @abc, u/abc) — có thể bổ sung theo site.</p>
-        <label class="check"><input id="pageKeepProperNouns" type="checkbox"> Giữ nguyên tên riêng</label>
-        <label class="check"><input id="pageDynamicTranslate" type="checkbox"> Tự dịch nội dung tải động (SPA, cuộn trang)</label>
-        <label class="check"><input id="pageLazyTranslate" type="checkbox"> Dịch lướt theo khung nhìn (tiết kiệm quota trang dài)</label>
-      </section>
-
-      <section>
-        <h2><i class="ico" data-icon="doc" data-icon-size="15"></i>Trang tài liệu kỹ thuật</h2>
-        <label for="docMode" class="small-label">Chế độ</label>
-        <select id="docMode">
-          <option value="auto">Tự động nhận diện</option>
-          <option value="on">Luôn bật</option>
-          <option value="off">Tắt</option>
-        </select>
-        <p class="note">Chế độ trang docs: giữ nguyên code block khi dịch trang tài liệu kỹ thuật.</p>
-      </section>
-    </div>
-
-    <!-- ================= Nút ✨ EN ================= -->
-    <div id="tab-input" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-input" hidden>
-      <section>
-        <h2><i class="ico" data-icon="wand" data-icon-size="15"></i>Nút ✨ EN cạnh ô nhập</h2>
-        <label class="check"><input id="inputHelper" type="checkbox"> Hiện nút ✨ EN cạnh ô nhập liệu</label>
-        <label for="defaultMode" class="small-label">Nút EN mặc định dùng</label>
-        <select id="defaultMode">
-          <option value="native">API riêng — tự nhiên (DeepL/Gemini/Deploy/OpenAI)</option>
-          <option value="quick">Free fallback — nhanh</option>
-        </select>
-        <label for="tone" class="small-label">Phong cách dịch bản địa (Gemini / Deploy / OpenAI)</label>
-        <select id="tone">
-          <option value="natural">Tự nhiên — bám đúng văn phong gốc</option>
-          <option value="professional">Trang trọng — email, công việc</option>
-          <option value="casual">Thân mật — chat, bạn bè</option>
-        </select>
-        <label class="check"><input id="fallbackQuick" type="checkbox"> Tự dịch miễn phí khi API riêng lỗi</label>
-        <label class="check"><input id="useContext" type="checkbox"> Dùng ngữ cảnh gần ô nhập</label>
-        <p class="note">Phím tắt mặc định: <code>Alt+Shift+E</code> (API riêng) · <code>Alt+Shift+G</code> (miễn phí) · <code>Alt+V</code> / <code>Alt+E</code> / <code>Alt+O</code> cho dịch trang. Đổi phím tại <code>chrome://extensions/shortcuts</code>.</p>
-      </section>
-    </div>
-
-    <!-- ================= API & key ================= -->
-    <div id="tab-api" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-api" hidden>
-      <section>
-        <div class="section-title">
-          <h2><i class="ico" data-icon="key" data-icon-size="15"></i>Provider ưu tiên</h2>
-          <button id="refreshDeeplUsage" type="button" class="link-button"><i class="ico" data-icon="refresh" data-icon-size="13"></i>Làm mới quota</button>
-        </div>
-        <div id="deeplUsage"></div>
-        <select id="preferred" aria-label="Provider ưu tiên"></select>
-        <p class="note">Khi dịch, extension thử provider ưu tiên trước; key lỗi/hết quota sẽ tự xoay sang key khác, rồi sang provider khác.</p>
-        <p class="note">Mẹo: chuột phải vào ảnh bất kỳ → "Dịch ảnh này (AI vision)" để OCR + dịch chữ trong ảnh (cần key Gemini hoặc Deploy.com — cả hai đều đọc được ảnh).</p>
-        <p class="note">Thêm key: dán <b>bao nhiêu key cũng được</b> vào một lượt — mỗi dòng 1 key, hoặc ngăn bằng dấu phẩy / khoảng trắng / gạch dọc. Nhận cả dạng dán từ code (<code>["key1", "key2"]</code>), danh sách có số thứ tự, dòng <code>API_KEY=...</code>, và chú thích cuối dòng (<code>key (acc 2)</code>) sẽ thành nhãn. Key trùng tự bỏ. Enter để thêm nhanh 1 key, Ctrl/⌘+Enter khi đã dán nhiều dòng.</p>
-        <p class="note">Dán key của nhiều nhà cung cấp cùng lúc cũng được: key nhận ra được định dạng (<code>AIza…</code> → Gemini, <code>uuid:fx</code> → DeepL, <code>sk-…</code>/<code>gsk_…</code> → OpenAI-compatible, token base64 kết thúc <code>==</code> → Deploy.com) sẽ <b>tự về đúng thẻ</b>, dán ở thẻ nào cũng vậy.</p>
-        <div id="providers"></div>
-        <div class="row action-row">
-          <button id="addCustomProvider" type="button"><i class="ico" data-icon="plus"></i>Thêm API tùy chỉnh</button>
-        </div>
-        <p class="note">Mỗi "API tùy chỉnh" là một endpoint OpenAI-compatible riêng (Groq, OpenRouter, API tự host…) với URL/model/key riêng — tất cả cùng nằm trong vòng xoay key, hết provider này tự sang provider kế.</p>
-        <div class="row two action-row">
-          <button id="testApi" type="button"><i class="ico" data-icon="zap"></i>Test API</button>
-        </div>
-        <p class="note">API key chỉ lưu trong <b>chrome.storage.local</b> của extension — gỡ extension là xoá sạch toàn bộ dữ liệu. Key không gửi đi đâu khác ngoài chính API của provider.</p>
-      </section>
-    </div>
-
-    <!-- ================= Template & glossary ================= -->
-    <div id="tab-terms" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-terms" hidden>
-      <section>
-        <div class="section-title">
-          <h2><i class="ico" data-icon="layers" data-icon-size="15"></i>Prompt Templates</h2>
-        </div>
-        <div id="templateList" class="key-list"></div>
-        <label class="small-label" for="tplName">Tên template</label>
-        <input id="tplName" type="text" spellcheck="false" placeholder="Ví dụ: Văn học">
-        <label class="small-label" for="tplPrompt">Prompt hướng dẫn dịch</label>
-        <textarea id="tplPrompt" rows="3" spellcheck="false" placeholder="Ví dụ: Dịch theo phong cách văn học, giàu hình ảnh…"></textarea>
-        <div class="row two action-row">
-          <button id="tplSave" class="primary" type="button"><i class="ico" data-icon="save"></i>Lưu template</button>
-          <button id="tplCancel" type="button" hidden><i class="ico" data-icon="close"></i>Huỷ sửa</button>
-        </div>
-        <p class="note">Chọn radio <strong>Đang dùng</strong> để áp dụng template khi dịch. Chọn nhanh ngay trong popup.</p>
-      </section>
-
-      <section>
-        <div class="section-title">
-          <h2><i class="ico" data-icon="book" data-icon-size="15"></i>Glossary thuật ngữ</h2>
-          <span id="glossaryCount" class="badge">0 từ</span>
-        </div>
-        <div id="glossaryList" class="key-list"></div>
-        <div class="glossary-add-row">
-          <input id="glossarySource" type="text" spellcheck="false" placeholder="Thuật ngữ gốc (source)" aria-label="Thuật ngữ gốc">
-          <input id="glossaryTarget" type="text" spellcheck="false" placeholder="Bản dịch cố định (target)" aria-label="Bản dịch cố định">
-          <button id="glossaryAdd" type="button"><i class="ico" data-icon="plus"></i>Thêm</button>
-        </div>
-        <div class="row three action-row">
-          <button id="glossaryImport" type="button"><i class="ico" data-icon="upload"></i>Import file…</button>
-          <button id="glossaryExportJson" type="button"><i class="ico" data-icon="download"></i>Xuất JSON</button>
-          <button id="glossaryExportCsv" type="button"><i class="ico" data-icon="download"></i>Xuất CSV</button>
-        </div>
-        <input id="glossaryFile" type="file" accept=".json,.csv,.tsv,.txt" hidden>
-        <p class="note">Import hỗ trợ .json / .csv / .tsv / .txt (định dạng "gốc =&gt; dịch"). Trùng source sẽ tự gộp, không nhân đôi.</p>
-      </section>
-    </div>
-
-    <!-- ================= Khác ================= -->
-    <div id="tab-misc" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-misc" hidden>
-      <section>
-        <h2><i class="ico" data-icon="moon" data-icon-size="15"></i>Giao diện</h2>
-        <label for="uiTheme" class="small-label">Bảng màu popup &amp; trang cài đặt</label>
-        <select id="uiTheme">
-          <option value="auto">Tự động theo hệ thống</option>
-          <option value="dark">Luôn tối</option>
-          <option value="light">Luôn sáng</option>
-        </select>
-      </section>
-
-      <section>
-        <h2><i class="ico" data-icon="volume" data-icon-size="15"></i>Đọc bản dịch (TTS)</h2>
-        <label class="check"><input id="ttsEnabled" type="checkbox"> Bật nút đọc bản dịch bằng giọng nói</label>
-        <label class="small-label" for="ttsRate">Tốc độ đọc: <span id="ttsRateValue">1</span>x</label>
-        <input id="ttsRate" type="range" min="0.5" max="2" step="0.25" value="1">
-      </section>
-
-      <section>
-        <div class="section-title">
-          <h2><i class="ico" data-icon="database" data-icon-size="15"></i>Cache bản dịch</h2>
-          <span id="cacheCount" class="badge">— mục</span>
-        </div>
-        <label class="check"><input id="translationCache" type="checkbox"> Nhớ bản dịch đã có (dùng chung mọi tab, sống qua lần khởi động lại)</label>
-        <p class="note">Tiết kiệm quota rất nhiều khi mở lại cùng một trang hoặc nhiều tab cùng site. <strong>Lưu ý riêng tư:</strong> phần đoạn gốc chỉ lưu dưới dạng mã băm, nhưng <strong>bản dịch được lưu nguyên văn</strong> trong bộ nhớ của extension — tức phần chữ đọc được của trang có tồn tại trên máy. Tab ẩn danh không bao giờ được ghi vào cache. Tắt toggle này hoặc bấm Xoá là sạch; gỡ extension cũng mất theo. Đổi provider/model hay văn phong sẽ tự dùng khoá cache khác.</p>
-        <div class="row two action-row">
-          <button id="cacheClear" class="danger-button" type="button"><i class="ico" data-icon="trash"></i>Xoá cache bản dịch</button>
-        </div>
-      </section>
-
-      <section>
-        <h2><i class="ico" data-icon="shield" data-icon-size="15"></i>Sao lưu &amp; khôi phục</h2>
-        <p class="note">Xuất toàn bộ cài đặt (kèm glossary, template, blacklist). <strong>API key không nằm trong file xuất</strong> — nhập lại thủ công sau khi khôi phục.</p>
-        <div class="row three action-row">
-          <button id="settingsExport" type="button"><i class="ico" data-icon="download"></i>Xuất cài đặt</button>
-          <button id="settingsImport" type="button"><i class="ico" data-icon="upload"></i>Nhập cài đặt…</button>
-          <button id="settingsReset" class="danger-button" type="button"><i class="ico" data-icon="reset"></i>Về mặc định</button>
-        </div>
-        <input id="settingsFile" type="file" accept=".json" hidden>
-      </section>
-    </div>
-  </main>
   <script src="icons.js"></script>
+  <script src="prompts.js"></script>
   <script src="providers.js"></script>
   <script src="glossary.js"></script>
   <script src="options.js"></script>

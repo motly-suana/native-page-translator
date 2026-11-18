@@ -1,25 +1,42 @@
-/* Trang Cài đặt — quản lý nhiều API key cho DeepL / Gemini / OpenAI-compatible. */
+/* Trang Command Center (v5.0) — quản lý Multi-Key Striping, 16+ Provider & Prompt Studio. */
 'use strict';
 
 const {
   CONFIG_STORAGE_KEY,
+  SYSTEM_PROMPT_OVERRIDE_KEY,
   PROVIDER_DEFS,
+  PRESET_ORDER,
+  PROVIDER_PRESETS,
+  ROUTING_STRATEGIES,
+  BUILTIN_ORIGINS: PROVIDER_BUILTIN_ORIGINS,
+  PAGE_STYLES,
   normalizeConfig,
   parseKeysInput,
-  detectProviderForKey,
+  detectPresetForKey,
   keyFormatWarning,
   emptyProviderConfig,
+  isPresetProvider,
   isCustomProvider,
   providerKind,
   providerDefOf,
   providerLabelOf,
   providerIdsOf,
+  activeKeysOf,
+  supportsVision,
   nextCustomProviderId,
   MAX_CUSTOM_PROVIDERS,
   DEPLOY_REASONING_EFFORTS,
   DEPLOY_DEFAULT_REASONING,
   DEPLOY_TRANSLATE_REASONING,
   maskKey,
+  keyHashId,
+  normalizeSystemPromptOverrides,
+  buildBatchInstructions,
+  buildNativeInstructions,
+  buildSummaryInstructions,
+  buildQaInstructions,
+  buildVisionInstructions,
+  buildOcrVisionInstructions,
 } = globalThis.NPT_PROVIDERS;
 
 const PREFS_KEYS = {
@@ -48,24 +65,88 @@ const PREFS_KEYS = {
   uiTheme: 'tm-ui-theme',
 };
 
-// Contract chung với content/background: templates, template đang dùng và glossary.
 const TEMPLATE_KEYS = { templates: 'tm-prompt-templates', active: 'tm-active-template' };
 const GLOSSARY_KEY = 'tm-glossary';
 
-// Seed mặc định khi 'tm-prompt-templates' chưa từng tồn tại trong storage.
 const DEFAULT_TEMPLATES = [
   { id: 'van-hoc', name: 'Văn học', prompt: 'Dịch theo phong cách văn học, giàu hình ảnh, giữ nhịp câu tự nhiên như văn xuôi.' },
   { id: 'ky-thuat', name: 'Kỹ thuật', prompt: 'Giữ nguyên thuật ngữ kỹ thuật tiếng Anh (không dịch tên hàm, lệnh, API, framework); chỉ dịch phần giải thích.' },
   { id: 'gen-z', name: 'Giọng Gen Z', prompt: 'Dịch theo giọng Gen Z Việt Nam: tự nhiên, hài hước vừa phải, dùng từ lóng phổ biến nhưng vẫn rõ nghĩa.' },
 ];
 
-// Giá trị hợp lệ của văn phong trang — sai thì về 'natural' theo contract.
-const PAGE_STYLE_VALUES = ['natural', 'casual', 'work-email', 'game-chat', 'genz', 'formal'];
+const PAGE_STYLE_VALUES = Object.keys(PAGE_STYLES || {
+  natural: 1,
+  casual: 1,
+  'work-email': 1,
+  'game-chat': 1,
+  genz: 1,
+  formal: 1,
+  technical: 1,
+  academic: 1,
+});
+
+const STRATEGY_LABELS = {
+  'smart-stripe': 'Smart Stripe',
+  'round-robin': 'Round-Robin',
+  failover: 'Failover',
+};
+
+const TAB_META = {
+  api: {
+    title: 'API & Điều phối Multi-Key',
+    sub: 'Quản lý 16+ nhà cung cấp AI, cân bằng tải theo độ trễ và giám sát sức khỏe từng API key',
+  },
+  page: {
+    title: 'Dịch trang web & Văn phong',
+    sub: 'Kiểm soát hiển thị song ngữ, chế độ docs, hiệu năng lazy-scroll và xem trước văn phong',
+  },
+  terms: {
+    title: 'Prompt Studio & Thuật ngữ',
+    sub: 'Tùy biến System Prompt lõi theo từng tác vụ AI, quản lý template và từ điển glossary',
+  },
+  input: {
+    title: 'Viết câu ✨ EN bản địa',
+    sub: 'Cấu hình nút trợ lý viết câu tiếng Anh ngay trong ô nhập liệu',
+  },
+  misc: {
+    title: 'Giao diện, Cache & Sao lưu',
+    sub: 'Chủ đề Sáng/Tối, giọng đọc TTS, bộ nhớ đệm dùng chung và sao lưu cấu hình',
+  },
+};
 
 const $ = selector => document.querySelector(selector);
 const statusElement = $('#status');
+const { svg: icon, brand: brandMark, logo: brandLogo } = globalThis.NPT_ICONS;
+const KEY_ICON = icon('key', { size: 13, className: 'key-ico' });
+const BUILTIN_ORIGINS = new Set(PROVIDER_BUILTIN_ORIGINS);
 
 let config = null;
+let dirty = false;
+let providerFilter = 'all';
+let providerQuery = '';
+let glossaryQuery = '';
+let healthSnapshot = null;
+const healthByKey = new Map();
+
+const KEY_PREVIEW_LIMIT = 8;
+const expandedKeyLists = new Set();
+const keyDrafts = new Map();
+let pendingKeyFocus = '';
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function iconButton(className, iconName, text, options = {}) {
+  const button = el('button', className);
+  button.type = 'button';
+  button.innerHTML = icon(iconName, { size: options.size || 14 });
+  if (text) button.appendChild(document.createTextNode(text));
+  return button;
+}
 
 function setStatus(text, error = false) {
   statusElement.textContent = '';
@@ -74,30 +155,53 @@ function setStatus(text, error = false) {
     return;
   }
   statusElement.dataset.tone = error ? 'error' : 'ok';
-  // Icon đứng đầu dòng nói ngay kết quả, không phải đọc hết câu mới biết.
   statusElement.insertAdjacentHTML('afterbegin', icon(error ? 'alert' : 'success', { size: 14, className: 'status-ico' }));
   statusElement.appendChild(document.createTextNode(text));
 }
 
-/* Trước đây provider URL/model/key được sửa thẳng vào object trong bộ nhớ và
- * chỉ ghi xuống storage khi bấm "Lưu cài đặt" — đóng tab là mất trắng mà không
- * có một dấu hiệu nào. Giờ mọi thay đổi bật cờ này và hiện pill cảnh báo. */
-let dirty = false;
-
 function markDirty() {
   dirty = true;
-  const pill = document.querySelector('#dirtyPill');
+  const pill = $('#dirtyPill');
   if (pill) pill.hidden = false;
 }
 
 function markClean() {
   dirty = false;
-  const pill = document.querySelector('#dirtyPill');
+  const pill = $('#dirtyPill');
   if (pill) pill.hidden = true;
 }
 
+/* ------------------------- Native <dialog> Confirmation ------------------------- */
+
+function confirmAction({ title = 'Xác nhận thao tác', message = '', confirmText = 'Xác nhận', danger = true }) {
+  const dialog = $('#confirmDialog');
+  if (!dialog?.showModal || dialog.open) {
+    return Promise.resolve(false);
+  }
+  const titleSpan = $('#confirmTitle span');
+  const desc = $('#confirmDesc');
+  const okBtn = $('#confirmOkBtn');
+  if (titleSpan) titleSpan.textContent = title;
+  if (desc) desc.textContent = message;
+  if (okBtn) {
+    okBtn.textContent = confirmText;
+    okBtn.className = danger ? 'danger-button' : 'primary';
+  }
+
+  return new Promise((resolve) => {
+    const onClose = () => {
+      const confirmed = dialog.returnValue === 'confirm';
+      dialog.returnValue = '';
+      resolve(confirmed);
+    };
+    dialog.addEventListener('close', onClose, { once: true });
+    dialog.showModal();
+  });
+}
+
+/* ------------------------- Load / Persist Config ------------------------- */
+
 async function loadConfig() {
-  // Bảo đảm background đã seed config (kèm key DeepL mặc định) trước khi đọc.
   await chrome.runtime.sendMessage({ type: 'getProviderStatus' }).catch(() => null);
   const values = await chrome.storage.local.get([CONFIG_STORAGE_KEY]);
   config = normalizeConfig(values[CONFIG_STORAGE_KEY]);
@@ -107,28 +211,164 @@ async function persistConfig() {
   await chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: config });
 }
 
-/* ------------------------- Render provider cards ------------------------- */
+/* ------------------------- KPI & Pool Health Telemetry ------------------------- */
 
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
+function formatDurationShort(ms) {
+  const sec = Math.max(1, Math.round(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  return min < 60 ? `${min}m` : `${Math.floor(min / 60)}h`;
 }
 
-/* Toàn bộ icon lấy từ icons.js — cùng lưới 24×24, cùng độ dày nét. */
-const { svg: icon, brand: brandMark, logo: brandLogo } = globalThis.NPT_ICONS;
+function formatHealthBadge(live, disabled = false) {
+  if (disabled || live?.disabled) {
+    return { tone: 'off', label: 'Đang tắt', title: 'Key đang bị tắt thủ công' };
+  }
+  if (!live) {
+    return { tone: 'idle', label: 'Chưa test', title: 'Chưa có thống kê trong phiên này' };
+  }
+  if (live.coolingDown) {
+    return {
+      tone: 'warn',
+      label: `Cooldown ${formatDurationShort(live.cooldownRemainingMs)}`,
+      title: live.lastStatus || 'Đang tạm nghỉ sau lỗi HTTP/rate limit',
+    };
+  }
+  if (live.errorStreak > 0) {
+    return {
+      tone: 'err',
+      label: live.lastStatus ? String(live.lastStatus).slice(0, 26) : `Lỗi (${live.errorStreak})`,
+      title: live.lastStatus || 'Gặp lỗi ở lần kiểm tra gần nhất',
+    };
+  }
+  if (live.emaLatencyMs > 0) {
+    return {
+      tone: 'ok',
+      label: `OK · ${live.emaLatencyMs}ms`,
+      title: `Thành công ${live.successCount} · Lỗi ${live.errorCount}`,
+    };
+  }
+  if (live.successCount > 0) {
+    return { tone: 'ok', label: 'Sẵn sàng', title: `Thành công ${live.successCount}` };
+  }
+  return { tone: 'idle', label: 'Chưa test', title: 'Chưa dùng trong phiên này' };
+}
 
-/* Icon chìa khóa nhỏ đầu mỗi key-row. */
-const KEY_ICON = icon('key', { size: 13, className: 'key-ico' });
+function resolveKeyHealth(providerId, keyIndex, entry) {
+  const live = healthByKey.get(keyHashId(providerId, entry?.key || ''))
+    || healthByKey.get(`${providerId}:${keyIndex}`);
+  return formatHealthBadge(live, Boolean(entry?.disabled));
+}
 
-/* Nút dựng bằng JS cũng có icon như nút trong HTML. */
-function iconButton(className, iconName, text, options = {}) {
-  const button = el('button', className);
-  button.type = 'button';
-  button.innerHTML = icon(iconName, { size: options.size || 14 });
-  button.appendChild(document.createTextNode(text));
-  return button;
+function updateKpiDisplay() {
+  if (!config) return;
+  let totalKeys = 0;
+  let activeKeys = 0;
+  let disabledKeys = 0;
+  for (const id of providerIdsOf(config)) {
+    const provider = config.providers[id];
+    for (const entry of provider.keys || []) {
+      totalKeys++;
+      if (entry.disabled) disabledKeys++;
+      else if (provider.enabled) activeKeys++;
+    }
+  }
+
+  const summary = healthSnapshot?.summary;
+  const coolingCount = summary?.coolingDownKeys || 0;
+  const readyCount = summary ? summary.healthyKeys : Math.max(0, activeKeys - coolingCount);
+  const avgLat = summary?.avgLatencyMs ? `${summary.avgLatencyMs}ms` : '—';
+  const stratLabel = STRATEGY_LABELS[config.routingStrategy] || 'Smart Stripe';
+
+  $('#kpiTotalKeys').textContent = String(totalKeys);
+  $('#kpiTotalSub').textContent = `${activeKeys} đang bật · ${disabledKeys} đã tắt`;
+  $('#kpiHealthKeys').textContent = String(readyCount);
+  $('#kpiHealthSub').textContent = coolingCount ? `${coolingCount} đang cooldown` : 'Không có key cooldown';
+  $('#kpiAvgLatency').textContent = avgLat;
+  $('#kpiThroughputSub').textContent = summary
+    ? `${summary.totalSuccess} OK · ${summary.totalError} lỗi`
+    : 'Chưa đo độ trễ';
+  $('#kpiStrategy').textContent = stratLabel;
+  if (healthSnapshot) {
+    $('#kpiCacheSub').textContent = healthSnapshot.cacheEnabled
+      ? `${Number(healthSnapshot.cacheEntries || 0).toLocaleString('vi-VN')} mục cache`
+      : 'Cache đang tắt';
+  }
+
+  $('#sidebarStrategy').textContent = stratLabel;
+  $('#sidebarKeyCount').textContent = `${activeKeys}/${totalKeys}`;
+  $('#sidebarHealth').textContent = coolingCount > 0
+    ? `${readyCount} OK / ${coolingCount} nghỉ`
+    : (activeKeys > 0 ? 'Ổn định' : 'Chưa có key');
+}
+
+async function refreshKeyPoolHealth() {
+  const result = await chrome.runtime.sendMessage({ type: 'getKeyPoolHealth' }).catch(() => null);
+  if (!result?.ok) {
+    updateKpiDisplay();
+    return;
+  }
+  healthSnapshot = result;
+  healthByKey.clear();
+  for (const provider of result.providers || []) {
+    for (const keyItem of provider.keys || []) {
+      healthByKey.set(keyItem.hashId || `${provider.id}:${keyItem.index}`, keyItem);
+    }
+  }
+  updateKpiDisplay();
+
+  const providersEl = $('#providers');
+  if (providersEl?.contains(document.activeElement)) {
+    for (const pill of providersEl.querySelectorAll('.health-pill[data-key-hash]')) {
+      const live = healthByKey.get(pill.dataset.keyHash);
+      if (!live) continue;
+      const badge = formatHealthBadge(live);
+      pill.dataset.health = badge.tone;
+      pill.textContent = badge.label;
+      pill.title = badge.title;
+    }
+    return;
+  }
+  renderProviders();
+}
+
+async function pingKeys({ providerId, keyIndex, triggerBtn } = {}) {
+  if (dirty) await saveSettings(false);
+  if (triggerBtn) triggerBtn.disabled = true;
+  setStatus(providerId ? `Đang kiểm tra key (${providerLabelOf(providerId, config.providers[providerId])})…` : 'Đang test toàn bộ pool API key…');
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'pingProviderKeys',
+      payload: { ...(providerId ? { providerId } : {}), ...(Number.isInteger(keyIndex) ? { keyIndex } : {}) },
+    });
+    if (!res?.ok) throw new Error(res?.error || 'Không test được API key');
+    const list = res.results || [];
+    if (!list.length) {
+      setStatus('Không có key nào đang bật để kiểm tra', true);
+      return;
+    }
+    const okCount = list.filter(item => item.ok).length;
+    const failCount = list.length - okCount;
+    await refreshKeyPoolHealth();
+    setStatus(
+      failCount === 0
+        ? `Hoàn tất: ${okCount}/${list.length} key hoạt động bình thường`
+        : `Kết quả: ${okCount} OK · ${failCount} key gặp lỗi (${list.find(i => !i.ok)?.error || ''})`,
+      failCount > 0,
+    );
+  } finally {
+    if (triggerBtn) triggerBtn.disabled = false;
+  }
+}
+
+/* ------------------------- Routing & Preferred ------------------------- */
+
+function renderRoutingStrategy() {
+  const strategy = ROUTING_STRATEGIES.includes(config.routingStrategy) ? config.routingStrategy : 'failover';
+  for (const radio of document.querySelectorAll('input[name="routingStrategy"]')) {
+    radio.checked = radio.value === strategy;
+  }
+  updateKpiDisplay();
 }
 
 function renderPreferredSelect() {
@@ -143,31 +383,157 @@ function renderPreferredSelect() {
   select.value = config.preferred;
 }
 
-/* Danh sách 30-50 key sẽ đẩy phần cấu hình provider ra khỏi màn hình, nên chỉ
- * hiện KEY_PREVIEW_LIMIT key đầu; phần còn lại gập lại (nhớ theo provider). */
-const KEY_PREVIEW_LIMIT = 8;
-const expandedKeyLists = new Set();
-// Nội dung đang gõ/dán trong ô thêm key — renderProviders() vẽ lại toàn bộ card
-// nên phải giữ lại, không thì thao tác ở provider khác là mất cả mớ key vừa dán.
-const keyDrafts = new Map();
-// Ô nhập bị thay bằng element mới sau khi vẽ lại -> trả con trỏ về đúng ô đó,
-// nhờ vậy gõ key rồi Enter liên tục vẫn chạy như bản cũ.
-let pendingKeyFocus = '';
+/* ------------------------- Key Routing & Universal Dropzone ------------------------- */
 
-/* Dán một mớ key trộn lẫn của nhiều nhà cung cấp thì tự chia về đúng thẻ:
- * key nhận ra được định dạng (AIza… / uuid:fx / sk-…) đi theo định dạng, key
- * lạ (API tự host) ở lại đúng thẻ đang dán. Key kiểu OpenAI đang dán ở thẻ
- * OpenAI-compatible nào thì ở yên thẻ đó — nhiều slot cùng kiểu nên không
- * đoán hộ được slot nào là đúng. */
 function routeKeyTo(key, currentId) {
-  const kind = detectProviderForKey(key);
-  if (!kind || kind === providerKind(currentId)) return currentId;
-  if (kind !== 'openai') return kind;
-  return providerIdsOf(config).find(id => providerKind(id) === 'openai') || currentId;
+  const detected = detectPresetForKey(key);
+  if (!detected) return currentId;
+  if (currentId && providerKind(currentId) === detected && (detected !== 'openai' || currentId !== 'openai')) {
+    return currentId;
+  }
+  return detected;
 }
 
-/* Bản cũ nhận cả chuỗi dán gộp làm MỘT key. Nếu config còn sót "key" kiểu đó
- * thì tách lại giúp, thay vì buộc người dùng xoá rồi dán tay từng cái. */
+function ensureProviderExists(providerId) {
+  if (!config.providers[providerId] && isPresetProvider(providerId)) {
+    config.providers[providerId] = emptyProviderConfig(providerId);
+  }
+  return config.providers[providerId];
+}
+
+function collectGroupedKeys(rawText, fallbackProviderId = null) {
+  const parsed = parseKeysInput(rawText, { existing: [] });
+  const groups = new Map();
+  let duplicates = parsed.duplicates;
+
+  for (const entry of parsed.entries) {
+    const targetId = fallbackProviderId
+      ? routeKeyTo(entry.key, fallbackProviderId)
+      : (detectPresetForKey(entry.key) || 'openai');
+    const existingProvider = config.providers[targetId];
+    const inProvider = existingProvider?.keys?.some(item => item.key === entry.key);
+    const inGroup = groups.get(targetId)?.some(item => item.key === entry.key);
+    if (inProvider || inGroup) {
+      duplicates++;
+      continue;
+    }
+    if (!groups.has(targetId)) groups.set(targetId, []);
+    groups.get(targetId).push(entry);
+  }
+
+  const total = [...groups.values()].reduce((sum, arr) => sum + arr.length, 0);
+  return { groups, total, duplicates, invalid: parsed.invalid };
+}
+
+function updateUniversalDropzonePreview() {
+  const input = $('#universalKeyInput');
+  const hint = $('#universalKeyHint');
+  const button = $('#universalAddBtn');
+  if (!input || !hint || !button) return;
+
+  const raw = input.value;
+  if (!raw.trim()) {
+    hint.textContent = 'Chưa có key nào trong ô dán nhanh.';
+    delete hint.dataset.tone;
+    button.lastChild.nodeValue = 'Tự nhận diện & Nạp vào Pool';
+    return;
+  }
+
+  const { groups, total, duplicates, invalid } = collectGroupedKeys(raw);
+  button.lastChild.nodeValue = total > 0 ? `Nạp ${total} key vào Pool` : 'Tự nhận diện & Nạp vào Pool';
+  const summary = [...groups].map(([id, list]) => {
+    const label = PROVIDER_PRESETS[id]?.label || providerLabelOf(id, config.providers[id]);
+    return `${list.length} → ${label}`;
+  });
+  const parts = total ? [`Phát hiện ${total} key (${summary.join(' · ')})`] : ['Không có key mới'];
+  if (duplicates) parts.push(`${duplicates} trùng`);
+  if (invalid.length) parts.push(`${invalid.length} mẩu bỏ qua`);
+  hint.textContent = parts.join(' · ');
+  hint.dataset.tone = total ? 'ok' : 'warn';
+}
+
+function commitUniversalDropzone() {
+  const input = $('#universalKeyInput');
+  const { groups, total, duplicates, invalid } = collectGroupedKeys(input.value);
+  if (!total) {
+    setStatus(duplicates ? `Tất cả ${duplicates} key đã tồn tại trong Pool` : 'Không nhận diện được key hợp lệ nào', true);
+    return;
+  }
+
+  const addedSummary = [];
+  let firstTarget = '';
+  for (const [targetId, entries] of groups) {
+    const target = ensureProviderExists(targetId);
+    if (!target) continue;
+    if (!firstTarget) firstTarget = targetId;
+    const hadKeys = target.keys.length > 0;
+    target.keys.push(...entries);
+    if (!hadKeys && !target.enabled) target.enabled = true;
+    if (target.keys.length > KEY_PREVIEW_LIMIT) expandedKeyLists.add(targetId);
+    addedSummary.push(`${entries.length} → ${providerLabelOf(targetId, target)}`);
+  }
+
+  input.value = '';
+  updateUniversalDropzonePreview();
+  renderPresetBar();
+  renderPreferredSelect();
+  renderProviders();
+  updateKpiDisplay();
+  markDirty();
+
+  const extra = [];
+  if (duplicates) extra.push(`bỏ ${duplicates} trùng`);
+  if (invalid.length) extra.push(`bỏ qua ${invalid.length} mẩu rác`);
+  setStatus(`Đã nạp ${addedSummary.join(' · ')}${extra.length ? ` (${extra.join(', ')})` : ''} — nhớ bấm Lưu cài đặt`, invalid.length > 0);
+  if (firstTarget) {
+    document.querySelector(`.provider-card[data-provider="${firstTarget}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+/* ------------------------- 1-Click Preset Bar ------------------------- */
+
+function renderPresetBar() {
+  const bar = $('#presetBar');
+  if (!bar) return;
+  bar.textContent = '';
+
+  for (const presetId of PRESET_ORDER) {
+    const preset = PROVIDER_PRESETS[presetId];
+    if (!preset) continue;
+    const exists = Boolean(config.providers[presetId]);
+    const chip = el('button', `preset-chip${exists ? ' is-added' : ''}`);
+    chip.type = 'button';
+    chip.innerHTML = brandMark(presetId, { size: 17 });
+    chip.appendChild(document.createTextNode(exists ? `${preset.label} ✓` : `+ ${preset.label}`));
+    chip.title = preset.badgeTag ? `${preset.label} (${preset.badgeTag})` : preset.label;
+    chip.addEventListener('click', () => {
+      if (!config.providers[presetId]) {
+        config.providers[presetId] = emptyProviderConfig(presetId);
+        pendingKeyFocus = presetId;
+        renderPresetBar();
+        renderPreferredSelect();
+        renderProviders();
+        updateKpiDisplay();
+        markDirty();
+        setStatus(`Đã thêm ${preset.label} — hãy dán key vào thẻ vừa tạo`);
+      } else {
+        providerFilter = 'all';
+        providerQuery = '';
+        $('#providerSearch').value = '';
+        for (const pill of document.querySelectorAll('.filter-pill')) {
+          pill.setAttribute('aria-pressed', String(pill.dataset.filter === 'all'));
+        }
+        pendingKeyFocus = presetId;
+        renderProviders();
+      }
+      document.querySelector(`.provider-card[data-provider="${presetId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    bar.appendChild(chip);
+  }
+}
+
+/* ------------------------- Per-Key Rows & Provider Cards ------------------------- */
+
 function splitPastedKeys(providerId) {
   const provider = config.providers[providerId];
   const before = provider.keys.length;
@@ -175,15 +541,17 @@ function splitPastedKeys(providerId) {
   for (const entry of provider.keys) {
     const parsed = parseKeysInput(entry.key, { existing: rebuilt });
     if (!parsed.entries.length) {
-      // Không bóc ra được key nào -> giữ nguyên, không âm thầm làm mất key.
       if (!rebuilt.some(item => item.key === entry.key)) rebuilt.push(entry);
       continue;
     }
-    for (const item of parsed.entries) rebuilt.push({ key: item.key, label: item.label || entry.label });
+    for (const item of parsed.entries) {
+      rebuilt.push({ key: item.key, label: item.label || entry.label, ...(entry.disabled ? { disabled: true } : {}) });
+    }
   }
   provider.keys = rebuilt;
   expandedKeyLists.add(providerId);
   renderProviders();
+  updateKpiDisplay();
   markDirty();
   setStatus(`Đã tách ${before} mục thành ${rebuilt.length} key — nhớ bấm Lưu cài đặt`);
 }
@@ -195,7 +563,7 @@ function renderKeyList(card, providerId) {
   const list = el('div', 'key-list');
 
   if (!provider.keys.length) {
-    list.appendChild(el('div', 'key-empty', providerKind(providerId) === 'openai'
+    list.appendChild(el('div', 'key-empty', providerKind(providerId) === 'openai' && !isPresetProvider(providerId)
       ? 'Không bắt buộc key nếu API của bạn là free.'
       : 'Chưa có key nào.'));
   }
@@ -204,11 +572,55 @@ function renderKeyList(card, providerId) {
   const visibleCount = expanded ? provider.keys.length : Math.min(provider.keys.length, KEY_PREVIEW_LIMIT);
 
   provider.keys.slice(0, visibleCount).forEach((entry, index) => {
-    const row = el('div', 'key-row');
+    const row = el('div', 'key-row key-row-v5');
+
+    const enableBox = document.createElement('input');
+    enableBox.type = 'checkbox';
+    enableBox.className = 'key-enable-toggle';
+    enableBox.checked = !entry.disabled;
+    enableBox.title = entry.disabled ? 'Bật lại key này' : 'Tạm tắt key này (không xoá)';
+    enableBox.addEventListener('change', () => {
+      if (enableBox.checked) delete entry.disabled;
+      else entry.disabled = true;
+      renderProviders();
+      updateKpiDisplay();
+      markDirty();
+    });
+    row.appendChild(enableBox);
+
     row.appendChild(el('span', 'key-index', String(index + 1)));
     row.insertAdjacentHTML('beforeend', KEY_ICON);
     row.appendChild(el('span', 'key-text', maskKey(entry.key)));
-    if (entry.label) row.appendChild(el('span', 'key-label', entry.label));
+
+    const labelBtn = el('button', 'key-label-btn', entry.label || '+ Nhãn');
+    labelBtn.type = 'button';
+    labelBtn.title = 'Bấm để sửa nhãn key';
+    labelBtn.addEventListener('click', () => {
+      const editor = document.createElement('input');
+      editor.type = 'text';
+      editor.maxLength = 40;
+      editor.value = entry.label || '';
+      editor.placeholder = 'Nhãn key…';
+      editor.style.cssText = 'width:120px;padding:2px 6px;font-size:11.5px';
+      const commit = () => {
+        entry.label = editor.value.trim();
+        markDirty();
+        renderProviders();
+      };
+      editor.addEventListener('blur', commit, { once: true });
+      editor.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') editor.blur();
+        if (e.key === 'Escape') {
+          editor.removeEventListener('blur', commit);
+          renderProviders();
+        }
+      });
+      labelBtn.replaceWith(editor);
+      editor.focus();
+      editor.select();
+    });
+    row.appendChild(labelBtn);
+
     const warning = keyFormatWarning(providerId, entry.key);
     if (warning) {
       const flag = el('span', 'key-warn');
@@ -216,12 +628,33 @@ function renderKeyList(card, providerId) {
       flag.title = warning;
       row.appendChild(flag);
     }
+
+    const health = resolveKeyHealth(providerId, index, entry);
+    const healthPill = el('span', 'health-pill', health.label);
+    healthPill.dataset.health = health.tone;
+    healthPill.dataset.keyHash = keyHashId(providerId, entry.key);
+    healthPill.title = health.title;
+    row.appendChild(healthPill);
+
+    const pingBtn = iconButton('row-action', 'activity', '', { size: 13 });
+    pingBtn.title = 'Ping kiểm tra riêng key này';
+    pingBtn.addEventListener('click', () => {
+      pingKeys({ providerId, keyIndex: index, triggerBtn: pingBtn }).catch(error => setStatus(error.message, true));
+    });
+    row.appendChild(pingBtn);
+
     const remove = iconButton('key-remove', 'trash', 'Xoá', { size: 13 });
     remove.title = 'Xoá key này';
-    remove.addEventListener('click', () => {
-      if (!confirm(`Xoá key ${maskKey(entry.key)} của ${label}?\nKhông khôi phục lại được.`)) return;
+    remove.addEventListener('click', async () => {
+      const confirmed = await confirmAction({
+        title: 'Xoá API key?',
+        message: `Xoá key ${maskKey(entry.key)} của ${label}?\nHành động này không thể khôi phục.`,
+        confirmText: 'Xoá key',
+      });
+      if (!confirmed) return;
       provider.keys.splice(index, 1);
       renderProviders();
+      updateKpiDisplay();
       markDirty();
       setStatus('Đã xoá key — nhớ bấm Lưu cài đặt');
     });
@@ -244,11 +677,17 @@ function renderKeyList(card, providerId) {
   }
   if (provider.keys.length >= 2) {
     const clearAll = iconButton('key-link key-link-danger', 'trash', `Xoá hết ${provider.keys.length} key`, { size: 13 });
-    clearAll.addEventListener('click', () => {
-      if (!confirm(`Xoá toàn bộ ${provider.keys.length} key của ${label}?\nKhông khôi phục lại được.`)) return;
+    clearAll.addEventListener('click', async () => {
+      const confirmed = await confirmAction({
+        title: `Xoá hết key của ${label}?`,
+        message: `Toàn bộ ${provider.keys.length} key của ${label} sẽ bị xoá.\nKhông khôi phục lại được.`,
+        confirmText: 'Xoá tất cả',
+      });
+      if (!confirmed) return;
       provider.keys = [];
       expandedKeyLists.delete(providerId);
       renderProviders();
+      updateKpiDisplay();
       markDirty();
       setStatus(`Đã xoá hết key của ${label} — nhớ bấm Lưu cài đặt`);
     });
@@ -260,23 +699,21 @@ function renderKeyList(card, providerId) {
   if (blobs.length) {
     const fixRow = el('div', 'key-fix');
     fixRow.insertAdjacentHTML('beforeend', icon('alert', { size: 13 }));
-    fixRow.appendChild(el('span', '', `${blobs.length} mục trông như nhiều key bị dán gộp thành một.`));
+    fixRow.appendChild(el('span', '', `${blobs.length} mục trông như nhiều key bị dán gộp.`));
     const fix = iconButton('key-link', 'wand', 'Tách ra', { size: 13 });
     fix.addEventListener('click', () => splitPastedKeys(providerId));
     fixRow.appendChild(fix);
     list.appendChild(fixRow);
   }
 
-  /* Ô thêm key là textarea (không còn <input> một dòng): dán bao nhiêu key
-   * cũng được, mỗi dòng một key hoặc ngăn bằng phẩy/space — parseKeysInput()
-   * lo phần bóc tách, số key nhận ra hiện ngay trên nút. */
   const box = el('div', 'add-key-box');
   const input = document.createElement('textarea');
   input.className = 'key-input';
   input.rows = 2;
   input.autocomplete = 'off';
   input.spellcheck = false;
-  input.placeholder = `${def.keyPlaceholder}\nDán nhiều key một lượt: mỗi dòng 1 key, hoặc ngăn bằng dấu phẩy / khoảng trắng.`;
+  input.dataset.noDirty = 'true';
+  input.placeholder = `${def.keyPlaceholder}\nDán nhiều key một lượt: mỗi dòng 1 key hoặc cách nhau bằng dấu phẩy / space.`;
   input.value = keyDrafts.get(providerId) || '';
 
   const foot = el('div', 'add-key-row');
@@ -284,28 +721,9 @@ function renderKeyList(card, providerId) {
   const addButton = iconButton('add-key-button', 'plus', 'Thêm key');
   foot.append(hint, addButton);
 
-  // Xem trước cả việc chia key: gộp theo provider đích, giữ đúng thứ tự dán.
-  const preview = () => {
-    const parsed = parseKeysInput(input.value, { existing: provider.keys });
-    const groups = new Map();
-    let duplicates = parsed.duplicates;
-    for (const entry of parsed.entries) {
-      const targetId = routeKeyTo(entry.key, providerId);
-      // Key đã nằm ở thẻ đích (dán ở thẻ khác) cũng là trùng.
-      if (config.providers[targetId].keys.some(item => item.key === entry.key)) {
-        duplicates++;
-        continue;
-      }
-      if (!groups.has(targetId)) groups.set(targetId, []);
-      groups.get(targetId).push(entry);
-    }
-    const total = [...groups.values()].reduce((sum, list) => sum + list.length, 0);
-    return { groups, total, duplicates, invalid: parsed.invalid };
-  };
-
   const refresh = () => {
-    const { groups, total, duplicates, invalid } = preview();
-    input.rows = Math.min(12, Math.max(2, input.value.split('\n').length));
+    const { groups, total, duplicates, invalid } = collectGroupedKeys(input.value, providerId);
+    input.rows = Math.min(10, Math.max(2, input.value.split('\n').length));
     addButton.lastChild.nodeValue = total > 1 ? `Thêm ${total} key` : 'Thêm key';
     if (!input.value.trim()) {
       hint.textContent = '';
@@ -313,9 +731,8 @@ function renderKeyList(card, providerId) {
       return;
     }
     const parts = [`nhận diện ${total} key mới`];
-    // Dán mớ key trộn lẫn -> nói rõ mỗi provider nhận bao nhiêu trước khi bấm.
     if (groups.size > 1 || (groups.size === 1 && !groups.has(providerId))) {
-      parts.push([...groups].map(([id, list]) => `${list.length} → ${providerLabelOf(id, config.providers[id])}`).join(' · '));
+      parts.push([...groups].map(([id, items]) => `${items.length} → ${providerLabelOf(id, config.providers[id] || PROVIDER_PRESETS[id])}`).join(' · '));
     }
     if (duplicates) parts.push(`${duplicates} trùng`);
     if (invalid.length) parts.push(`${invalid.length} mẩu bỏ qua`);
@@ -324,7 +741,7 @@ function renderKeyList(card, providerId) {
   };
 
   const addKeys = () => {
-    const { groups, total, duplicates, invalid } = preview();
+    const { groups, total, duplicates, invalid } = collectGroupedKeys(input.value, providerId);
     if (!total) {
       setStatus(duplicates
         ? `Toàn bộ ${duplicates} key vừa dán đã có trong danh sách`
@@ -334,10 +751,10 @@ function renderKeyList(card, providerId) {
 
     const added = [];
     for (const [targetId, entries] of groups) {
-      const target = config.providers[targetId];
+      const target = ensureProviderExists(targetId);
+      if (!target) continue;
       const hadKeys = target.keys.length > 0;
       target.keys.push(...entries);
-      // Provider vừa có key đầu tiên thì bật luôn, không thì key nằm im vô ích.
       if (!hadKeys && !target.enabled) target.enabled = true;
       if (target.keys.length > KEY_PREVIEW_LIMIT) expandedKeyLists.add(targetId);
       added.push(`${entries.length} key → ${providerLabelOf(targetId, target)}`);
@@ -345,17 +762,19 @@ function renderKeyList(card, providerId) {
 
     keyDrafts.delete(providerId);
     pendingKeyFocus = providerId;
+    renderPresetBar();
     renderPreferredSelect();
     renderProviders();
+    updateKpiDisplay();
     markDirty();
 
     const notes = [];
     if (duplicates) notes.push(`bỏ ${duplicates} key trùng`);
-    if (invalid.length) notes.push(`bỏ qua ${invalid.length} mẩu không giống key (${invalid.slice(0, 3).join(', ')})`);
+    if (invalid.length) notes.push(`bỏ qua ${invalid.length} mẩu không giống key`);
     const suspicious = [...groups].flatMap(([id, entries]) => entries
       .map(entry => keyFormatWarning(id, entry.key))
       .filter(Boolean));
-    if (suspicious.length) notes.push(`${suspicious.length} key trông sai định dạng: ${suspicious[0]}`);
+    if (suspicious.length) notes.push(`cảnh báo định dạng: ${suspicious[0]}`);
     setStatus(
       `Đã thêm ${added.join(' · ')}${notes.length ? ` — ${notes.join(' · ')}` : ''} — nhớ bấm Lưu cài đặt`,
       Boolean(invalid.length || suspicious.length),
@@ -369,8 +788,6 @@ function renderKeyList(card, providerId) {
   });
   input.addEventListener('keydown', event => {
     if (event.key !== 'Enter' || event.shiftKey) return;
-    // Gõ tay 1 key rồi Enter -> thêm luôn (như bản cũ). Khi đã dán nhiều dòng
-    // thì Enter là xuống dòng bình thường, phải Ctrl/Cmd+Enter mới thêm.
     if (input.value.includes('\n') && !(event.ctrlKey || event.metaKey)) return;
     event.preventDefault();
     addKeys();
@@ -392,16 +809,14 @@ function renderProviderFields(card, providerId) {
   const provider = config.providers[providerId];
   const fields = el('div', 'provider-fields');
 
-  // Nhiều slot cùng kiểu OpenAI-compatible -> phải đặt tên mới phân biệt được
-  // trong ô "Provider ưu tiên" và trong thông báo lỗi.
-  if (providerKind(providerId) === 'openai') {
+  if (isCustomProvider(providerId) || providerId === 'openai') {
     fields.appendChild(el('label', 'small-label', 'Tên hiển thị'));
     const name = document.createElement('input');
     name.type = 'text';
     name.spellcheck = false;
     name.maxLength = 40;
     name.value = provider.name || '';
-    name.placeholder = 'VD: Groq · OpenRouter · API nhà';
+    name.placeholder = 'VD: Groq · OpenRouter · API tự host';
     name.addEventListener('input', () => {
       provider.name = name.value.trim();
       markDirty();
@@ -414,7 +829,7 @@ function renderProviderFields(card, providerId) {
     fields.appendChild(name);
   }
 
-  if (def.needsUrl) {
+  if (def?.needsUrl) {
     fields.appendChild(el('label', 'small-label', 'API URL'));
     const url = document.createElement('input');
     url.type = 'url';
@@ -443,9 +858,9 @@ function renderProviderFields(card, providerId) {
     fields.appendChild(format);
   }
 
-  if (def.needsModel) {
+  if (def?.needsModel) {
     fields.appendChild(el('label', 'small-label', providerKind(providerId) === 'gemini'
-      ? 'Model — khuyên dùng gemini-3.1-flash-lite (rẻ, ít token)'
+      ? 'Model — khuyên dùng gemini-3.1-flash-lite (nhanh, tiết kiệm quota)'
       : 'Model'));
     const model = document.createElement('input');
     model.type = 'text';
@@ -469,8 +884,6 @@ function renderProviderFields(card, providerId) {
   }
 
   if (providerKind(providerId) === 'deploy') {
-    /* Hai mức riêng vì đo thật trên API: 'max' chỉ có lợi cho giải bài, còn
-     * dịch/OCR thì chậm 5-8x mà không khá hơn (bounding box ảnh còn lệch hơn). */
     const templates = {
       none: 'Không suy luận (nhanh nhất)',
       minimal: 'Tối thiểu',
@@ -492,31 +905,21 @@ function renderProviderFields(card, providerId) {
       select.addEventListener('change', () => { onChange(select.value); markDirty(); });
       return select;
     };
-    const hintOf = text => {
-      const hint = el('div', 'hint-text', text);
-      hint.style.fontSize = '11px';
-      hint.style.color = '#6b7280';
-      hint.style.marginLeft = '20px';
-      fields.appendChild(hint);
-    };
 
-    fields.appendChild(el('label', 'small-label', 'Mức suy luận khi dịch (dịch trang, dịch ảnh, OCR, tóm tắt)'));
+    fields.appendChild(el('label', 'small-label', 'Mức suy luận khi dịch (trang, ảnh, OCR, tóm tắt)'));
     fields.appendChild(makeEffortSelect(
       provider.translateReasoningEffort, DEPLOY_TRANSLATE_REASONING,
       value => { provider.translateReasoningEffort = value; },
     ));
-    hintOf('⚡ Mặc định "Không suy luận": nhanh gấp 5-8 lần mà bản dịch tương đương. Bật cao hơn nếu trang toàn câu khó/nhiều ẩn ý.');
-
     fields.appendChild(el('label', 'small-label', 'Mức suy luận khi giải bài (Quick Solver)'));
     fields.appendChild(makeEffortSelect(
       provider.reasoningEffort, DEPLOY_DEFAULT_REASONING,
       value => { provider.reasoningEffort = value; },
     ));
-    hintOf('🧠 Mặc định "Tối đa": giải toán/câu hỏi khó chính xác hơn, đổi lại chậm hơn (bài khó có thể 1-3 phút).');
   }
 
   if (providerKind(providerId) === 'gemini') {
-    const searchWrap = el('label', 'checkbox-label');
+    const searchWrap = el('label', 'check');
     const searchCheck = document.createElement('input');
     searchCheck.type = 'checkbox';
     searchCheck.checked = provider.googleSearch !== false;
@@ -524,25 +927,10 @@ function renderProviderFields(card, providerId) {
       provider.googleSearch = searchCheck.checked;
       markDirty();
     });
-    searchWrap.appendChild(searchCheck);
-    searchWrap.appendChild(document.createTextNode(' 🔍 Bật Google Search tra cứu thực tế (cho sự kiện, ngày tháng và câu hỏi khó)'));
-    searchWrap.style.marginTop = '8px';
-    searchWrap.style.display = 'flex';
-    searchWrap.style.alignItems = 'center';
-    searchWrap.style.gap = '6px';
-    searchWrap.style.fontSize = '12px';
-    searchWrap.style.cursor = 'pointer';
+    searchWrap.append(searchCheck, document.createTextNode('Bật Google Search tra cứu thực tế (sự kiện, dữ liệu mới)'));
     fields.appendChild(searchWrap);
 
-    const searchHint = el('div', 'hint-text');
-    searchHint.textContent = '💡 Google Search trên Free tier có hạn mức riêng (1-5 lượt/phút). Extension sẽ tự động bỏ search để giải tiếp nếu hết quota.';
-    searchHint.style.fontSize = '11px';
-    searchHint.style.color = '#6b7280';
-    searchHint.style.marginLeft = '20px';
-    searchHint.style.marginTop = '2px';
-    fields.appendChild(searchHint);
-
-    const extendedWrap = el('label', 'checkbox-label');
+    const extendedWrap = el('label', 'check');
     const extendedCheck = document.createElement('input');
     extendedCheck.type = 'checkbox';
     extendedCheck.checked = provider.extendedThinking === true;
@@ -550,22 +938,13 @@ function renderProviderFields(card, providerId) {
       provider.extendedThinking = extendedCheck.checked;
       markDirty();
     });
-    extendedWrap.appendChild(extendedCheck);
-    extendedWrap.appendChild(document.createTextNode(' 🧠 Mặc định bật Giải toán sâu (Gemini 3.8 Flash Extended Thinking)'));
-    extendedWrap.style.marginTop = '6px';
-    extendedWrap.style.display = 'flex';
-    extendedWrap.style.alignItems = 'center';
-    extendedWrap.style.gap = '6px';
-    extendedWrap.style.fontSize = '12px';
-    extendedWrap.style.cursor = 'pointer';
+    extendedWrap.append(extendedCheck, document.createTextNode('Mặc định bật Extended Thinking khi giải toán sâu'));
     fields.appendChild(extendedWrap);
   }
 
   card.appendChild(fields);
 }
 
-/* Thêm một slot OpenAI-compatible nữa: Groq, OpenRouter, API tự host... mỗi
- * slot có endpoint/model/key riêng và cùng nằm trong vòng xoay key. */
 function addCustomProvider() {
   const id = nextCustomProviderId(config);
   if (!id) {
@@ -575,6 +954,7 @@ function addCustomProvider() {
   config.providers[id] = emptyProviderConfig(id);
   renderPreferredSelect();
   renderProviders();
+  updateKpiDisplay();
   markDirty();
   setStatus('Đã thêm slot API tùy chỉnh — điền URL/model rồi dán key vào đó');
   const card = document.querySelector(`.provider-card[data-provider="${id}"]`);
@@ -582,28 +962,61 @@ function addCustomProvider() {
   card?.querySelector('input[type="text"]')?.focus();
 }
 
-function removeCustomProvider(providerId) {
+async function removeOptionalProvider(providerId) {
   const provider = config.providers[providerId];
   const label = providerLabelOf(providerId, provider);
-  if (!confirm(`Xoá "${label}" cùng ${provider.keys.length} key của nó?\nKhông khôi phục lại được.`)) return;
+  if (provider.keys.length > 0) {
+    const confirmed = await confirmAction({
+      title: `Xoá "${label}"?`,
+      message: `Xoá "${label}" cùng ${provider.keys.length} key bên trong?\nKhông khôi phục lại được.`,
+      confirmText: 'Xoá provider',
+    });
+    if (!confirmed) return;
+  }
   delete config.providers[providerId];
   keyDrafts.delete(providerId);
   expandedKeyLists.delete(providerId);
   if (config.preferred === providerId) config.preferred = providerIdsOf(config)[0];
+  renderPresetBar();
   renderPreferredSelect();
   renderProviders();
+  updateKpiDisplay();
   markDirty();
   setStatus(`Đã xoá "${label}" — nhớ bấm Lưu cài đặt`);
+}
+
+function matchesProviderFilter(providerId, provider) {
+  const query = providerQuery.trim().toLowerCase();
+  if (query) {
+    const label = providerLabelOf(providerId, provider).toLowerCase();
+    const haystack = `${providerId} ${label} ${provider.model || ''} ${provider.url || ''}`.toLowerCase();
+    if (!haystack.includes(query)) return false;
+  }
+  if (providerFilter === 'active') return provider.keys.length > 0;
+  if (providerFilter === 'vision') return supportsVision(providerId, provider);
+  if (providerFilter === 'issue') {
+    return provider.keys.some((entry, idx) => {
+      if (entry.disabled) return false;
+      const h = healthByKey.get(keyHashId(providerId, entry.key)) || healthByKey.get(`${providerId}:${idx}`);
+      return Boolean(h && (h.coolingDown || h.errorStreak > 0));
+    });
+  }
+  return true;
 }
 
 function renderProviders() {
   const container = $('#providers');
   container.textContent = '';
 
+  let shown = 0;
   for (const providerId of providerIdsOf(config)) {
     const def = providerDefOf(providerId);
     const provider = config.providers[providerId];
+    if (!matchesProviderFilter(providerId, provider)) continue;
+    shown++;
+
     const custom = isCustomProvider(providerId);
+    const removable = custom || isPresetProvider(providerId);
 
     const card = el('div', 'provider-card');
     card.dataset.enabled = String(provider.enabled);
@@ -617,24 +1030,41 @@ function renderProviders() {
     toggle.addEventListener('change', () => {
       provider.enabled = toggle.checked;
       card.dataset.enabled = String(provider.enabled);
+      updateKpiDisplay();
       markDirty();
     });
     head.appendChild(toggle);
-    // Slot tùy chỉnh đổi màu theo số thứ tự -> Groq / OpenRouter nhìn là phân biệt được.
+
     const customIndex = custom ? Number(providerId.split('-')[1]) : 0;
-    head.insertAdjacentHTML('beforeend', brandMark(providerKind(providerId), { custom: customIndex }));
+    head.insertAdjacentHTML('beforeend', brandMark(providerId, { custom: customIndex }));
     head.appendChild(el('span', 'provider-title', providerLabelOf(providerId, provider)));
-    head.appendChild(el('span', 'badge', `${provider.keys.length} key`));
-    if (custom) {
-      const remove = iconButton('key-link key-link-danger', 'trash', 'Xoá provider', { size: 13 });
-      remove.title = 'Xoá hẳn slot API tùy chỉnh này';
-      remove.addEventListener('click', () => removeCustomProvider(providerId));
-      head.appendChild(remove);
+
+    const badges = el('div', 'provider-badges');
+    if (supportsVision(providerId, provider)) {
+      badges.appendChild(el('span', 'pill-vision', 'Vision'));
     }
+    const activeCount = activeKeysOf(provider).length;
+    badges.appendChild(el('span', 'badge', `${activeCount}/${provider.keys.length} key`));
+
+    if (activeCount > 0) {
+      const testCardBtn = iconButton('key-link', 'activity', 'Test', { size: 12 });
+      testCardBtn.title = 'Test toàn bộ key đang bật của provider này';
+      testCardBtn.addEventListener('click', () => {
+        pingKeys({ providerId, triggerBtn: testCardBtn }).catch(error => setStatus(error.message, true));
+      });
+      badges.appendChild(testCardBtn);
+    }
+
+    if (removable) {
+      const remove = iconButton('key-link key-link-danger', 'trash', 'Xoá', { size: 12 });
+      remove.title = 'Xoá thẻ provider này';
+      remove.addEventListener('click', () => removeOptionalProvider(providerId));
+      badges.appendChild(remove);
+    }
+    head.appendChild(badges);
     card.appendChild(head);
 
-    // OpenAI-compatible là endpoint tự chọn nên không có trang "lấy key".
-    if (def.site) {
+    if (def?.site) {
       const site = el('div', 'provider-site');
       const link = document.createElement('a');
       link.href = def.site;
@@ -643,6 +1073,7 @@ function renderProviders() {
       link.innerHTML = icon('external', { size: 12 });
       link.appendChild(document.createTextNode('Lấy API key tại đây'));
       site.appendChild(link);
+      if (def.badgeTag) site.appendChild(el('span', 'badge', def.badgeTag));
       card.appendChild(site);
     }
 
@@ -650,20 +1081,13 @@ function renderProviders() {
     renderProviderFields(card, providerId);
     container.appendChild(card);
   }
+
+  if (!shown) {
+    container.appendChild(el('div', 'key-empty', 'Không tìm thấy provider nào khớp bộ lọc hiện tại.'));
+  }
 }
 
-/* ------------------------- Quyền truy cập URL tùy chỉnh ------------------------- */
-
-const BUILTIN_ORIGINS = new Set([
-  'https://api.openai.com',
-  'https://translate.googleapis.com',
-  'https://translate.google.com',
-  'https://api.mymemory.translated.net',
-  'https://generativelanguage.googleapis.com',
-  'https://api-sf1-cdn.deploy.com',
-  'https://api-free.deepl.com',
-  'https://api.deepl.com',
-]);
+/* ------------------------- Origin Permissions ------------------------- */
 
 function endpointOrigin(endpoint, label) {
   let url;
@@ -676,16 +1100,15 @@ function endpointOrigin(endpoint, label) {
   return url.origin;
 }
 
-/* Mỗi slot OpenAI-compatible là một origin cần quyền riêng. Gom hết origin
- * còn thiếu rồi hỏi MỘT lần: chrome.permissions.request cần user gesture, hỏi
- * nhiều lần liên tiếp sẽ bị Chrome chặn từ lần thứ hai. */
 async function ensureEndpointPermissions() {
   const wanted = new Set();
   for (const id of providerIdsOf(config)) {
-    if (providerKind(id) !== 'openai') continue;
     const provider = config.providers[id];
+    const def = providerDefOf(id);
     if (!provider.enabled && !provider.keys.length) continue;
-    const origin = endpointOrigin(provider.url || providerDefOf(id).defaultUrl, providerLabelOf(id, provider));
+    const rawUrl = provider.url || def?.defaultUrl;
+    if (!rawUrl) continue;
+    const origin = endpointOrigin(rawUrl, providerLabelOf(id, provider));
     if (!BUILTIN_ORIGINS.has(origin)) wanted.add(`${origin}/*`);
   }
   if (!wanted.size) return;
@@ -700,9 +1123,48 @@ async function ensureEndpointPermissions() {
   if (!granted) throw new Error(`Bạn chưa cấp quyền truy cập ${missing.length} API URL tùy chỉnh`);
 }
 
-/* ------------------------- Lưu / Test / Dịch trang ------------------------- */
+/* ------------------------- Page Live Preview ------------------------- */
 
-// Parse textarea blacklist: mỗi dòng 1 domain — trim, lowercase, bỏ dòng rỗng.
+const PAGE_PREVIEW_SAMPLES = {
+  natural: 'Triển khai pool worker không gián đoạn trước khi bộ giới hạn tốc độ kích hoạt.',
+  casual: 'Bật pool worker chạy mượt trước khi dính giới hạn tốc độ nhé.',
+  'work-email': 'Vui lòng triển khai worker pool không gián đoạn trước khi cơ chế giới hạn tốc độ có hiệu lực.',
+  'game-chat': 'Dựng pool worker zero-downtime lẹ trước khi ăn rate limit!',
+  genz: 'Triển khai pool worker mượt không rớt nhịp trước khi dính rate limit nha.',
+  formal: 'Thực hiện triển khai cụm xử lý liên tục trước khi ngưỡng giới hạn lưu lượng được áp dụng.',
+  technical: 'Triển khai zero-downtime worker pool trước khi rate limiter kích hoạt.',
+  academic: 'Thiết lập nhóm tiến trình xử lý liên tục (zero-downtime) trước ngưỡng điều tiết lưu lượng.',
+};
+
+function updatePageStylePreview() {
+  const style = $('#pageStyle').value;
+  const dialect = $('#pageDialect').value;
+  const mode = $('#pageTranslateMode').value;
+  const displayMode = $('#pageDisplayMode').value;
+  const grammarFix = $('#pageGrammarFix').checked;
+
+  const meta = $('#pagePreviewMeta');
+  const out = $('#pagePreviewOutput');
+  if (!meta || !out) return;
+
+  meta.textContent = '';
+  const badges = [
+    `Văn phong: ${style}`,
+    `Chế độ: ${mode === 'literal' ? 'Sát chữ' : 'Tự nhiên'}`,
+    `Hiển thị: ${displayMode === 'bilingual' ? 'Song ngữ' : 'Thay thế'}`,
+    `Ngữ pháp EN: ${dialect.toUpperCase()}`,
+  ];
+  if (grammarFix) badges.push('Sửa ngữ pháp');
+  for (const b of badges) meta.appendChild(el('span', 'badge', b));
+
+  const sampleVi = PAGE_PREVIEW_SAMPLES[style] || PAGE_PREVIEW_SAMPLES.natural;
+  out.textContent = displayMode === 'bilingual'
+    ? `Deploy the zero-downtime worker pool before the rate limiter kicks in.\n↳ ${sampleVi}`
+    : sampleVi;
+}
+
+/* ------------------------- Save / Test / Prefs ------------------------- */
+
 function parseSiteBlacklist(text) {
   return String(text || '')
     .split('\n')
@@ -710,12 +1172,15 @@ function parseSiteBlacklist(text) {
     .filter(Boolean);
 }
 
+let studioOverrides = normalizeSystemPromptOverrides({});
+
 async function saveSettings(showSaved = true) {
   config.preferred = $('#preferred').value;
   await ensureEndpointPermissions();
 
   await persistConfig();
   await chrome.storage.local.set({
+    [SYSTEM_PROMPT_OVERRIDE_KEY]: normalizeSystemPromptOverrides(studioOverrides),
     [PREFS_KEYS.context]: $('#useContext').checked,
     [PREFS_KEYS.defaultMode]: $('#defaultMode').value,
     [PREFS_KEYS.fallbackQuick]: $('#fallbackQuick').checked,
@@ -741,11 +1206,12 @@ async function saveSettings(showSaved = true) {
     [PREFS_KEYS.uiTheme]: $('#uiTheme').value,
   });
   markClean();
-  if (showSaved) setStatus('Đã lưu cài đặt');
+  updateKpiDisplay();
+  if (showSaved) setStatus('Đã lưu toàn bộ cài đặt');
 }
 
 async function testApi() {
-  setStatus('Đang test API…');
+  setStatus('Đang test dịch câu mẫu…');
   await saveSettings(false);
   const result = await chrome.runtime.sendMessage({
     type: 'nativeTranslate',
@@ -760,11 +1226,15 @@ async function testApi() {
       : (result?.error || 'API test thất bại');
     throw new Error(message);
   }
+  await refreshKeyPoolHealth();
   setStatus(`API hoạt động (${result.providerLabel}):\n${result.text}`);
 }
 
 async function loadPrefs() {
-  const values = await chrome.storage.local.get(Object.values(PREFS_KEYS));
+  const values = await chrome.storage.local.get([...Object.values(PREFS_KEYS), SYSTEM_PROMPT_OVERRIDE_KEY]);
+  studioOverrides = normalizeSystemPromptOverrides(values[SYSTEM_PROMPT_OVERRIDE_KEY]);
+  renderPromptStudio();
+
   $('#useContext').checked = values[PREFS_KEYS.context] !== false;
   $('#defaultMode').value = values[PREFS_KEYS.defaultMode] === 'quick' ? 'quick' : 'native';
   $('#fallbackQuick').checked = values[PREFS_KEYS.fallbackQuick] !== false;
@@ -774,7 +1244,6 @@ async function loadPrefs() {
   $('#inputHelper').checked = values[PREFS_KEYS.inputHelper] !== false;
   const blacklist = values[PREFS_KEYS.siteBlacklist];
   $('#siteBlacklist').value = Array.isArray(blacklist) ? blacklist.join('\n') : '';
-  // Dịch trang nâng cao — default khớp contract khi storage chưa có key (checkbox mặc định true).
   $('#pageDisplayMode').value = values[PREFS_KEYS.pageDisplayMode] === 'bilingual' ? 'bilingual' : 'replace';
   $('#pageStyle').value = PAGE_STYLE_VALUES.includes(values[PREFS_KEYS.pageStyle]) ? values[PREFS_KEYS.pageStyle] : 'natural';
   $('#pageDialect').value = values[PREFS_KEYS.pageDialect] === 'uk' ? 'uk' : 'us';
@@ -785,7 +1254,6 @@ async function loadPrefs() {
   $('#pageKeepProperNouns').checked = values[PREFS_KEYS.pageKeepProperNouns] !== false;
   $('#pageDynamicTranslate').checked = values[PREFS_KEYS.pageDynamicTranslate] !== false;
   $('#pageLazyTranslate').checked = values[PREFS_KEYS.pageLazyTranslate] !== false;
-  // Trang tài liệu & TTS — default khớp contract ('auto' / bật / 1x).
   $('#docMode').value = ['auto', 'on', 'off'].includes(values[PREFS_KEYS.docMode]) ? values[PREFS_KEYS.docMode] : 'auto';
   $('#ttsEnabled').checked = values[PREFS_KEYS.ttsEnabled] !== false;
   const ttsRate = Number(values[PREFS_KEYS.ttsRate]);
@@ -795,6 +1263,39 @@ async function loadPrefs() {
   const theme = values[PREFS_KEYS.uiTheme];
   $('#uiTheme').value = ['dark', 'light'].includes(theme) ? theme : 'auto';
   applyTheme(theme);
+  updatePageStylePreview();
+}
+
+/* ------------------------- Prompt Studio ------------------------- */
+
+function buildStudioPreviewText(task, override) {
+  if (task === 'batch') {
+    return buildBatchInstructions('auto', 'Vietnamese', {
+      style: $('#pageStyle')?.value || 'natural',
+      dialect: $('#pageDialect')?.value || 'us',
+      mode: $('#pageTranslateMode')?.value || 'natural',
+      grammarFix: Boolean($('#pageGrammarFix')?.checked),
+      systemOverride: override,
+    });
+  }
+  if (task === 'native') return buildNativeInstructions($('#tone')?.value || 'natural', override);
+  if (task === 'summary') return buildSummaryInstructions('Vietnamese', 8, override);
+  if (task === 'qa') return buildQaInstructions(override);
+  if (task === 'vision') return buildVisionInstructions('Vietnamese', override);
+  if (task === 'ocr') return buildOcrVisionInstructions(override);
+  return '';
+}
+
+function renderPromptStudio() {
+  const taskEl = $('#studioTask');
+  const inputEl = $('#studioOverrideInput');
+  const previewEl = $('#studioPreview');
+  if (!taskEl || !inputEl || !previewEl) return;
+
+  const task = taskEl.value || 'batch';
+  const override = studioOverrides[task] || '';
+  if (inputEl.value !== override) inputEl.value = override;
+  previewEl.textContent = buildStudioPreviewText(task, override);
 }
 
 /* ------------------------- Prompt Templates ------------------------- */
@@ -821,6 +1322,7 @@ function renderTemplates() {
     radio.type = 'radio';
     radio.name = 'activeTemplate';
     radio.className = 'tpl-radio';
+    radio.dataset.noDirty = 'true';
     radio.checked = tpl.id === activeTemplateId;
     radio.title = 'Chọn làm template đang dùng';
     radio.addEventListener('change', async () => {
@@ -861,12 +1363,12 @@ function renderTemplates() {
     list.appendChild(row);
   });
 
-  // Dòng "không dùng template" — radio về mặc định.
   const noneRow = el('div', 'key-row');
   const noneRadio = document.createElement('input');
   noneRadio.type = 'radio';
   noneRadio.name = 'activeTemplate';
   noneRadio.className = 'tpl-radio';
+  noneRadio.dataset.noDirty = 'true';
   noneRadio.checked = activeTemplateId === '';
   noneRadio.title = 'Không dùng template';
   noneRadio.addEventListener('change', async () => {
@@ -912,7 +1414,6 @@ async function saveTemplateForm() {
 async function loadTemplates() {
   const values = await chrome.storage.local.get([TEMPLATE_KEYS.templates, TEMPLATE_KEYS.active]);
   if (values[TEMPLATE_KEYS.templates] === undefined) {
-    // Chưa từng tồn tại → seed bộ mặc định (mảng rỗng đã lưu thì tôn trọng, không seed lại).
     templates = DEFAULT_TEMPLATES.map(tpl => ({ ...tpl }));
     await persistTemplates();
   } else {
@@ -923,7 +1424,7 @@ async function loadTemplates() {
   renderTemplates();
 }
 
-/* ------------------------- Glossary thuật ngữ ------------------------- */
+/* ------------------------- Searchable Glossary ------------------------- */
 
 let glossary = [];
 
@@ -934,14 +1435,20 @@ async function persistGlossary() {
 function renderGlossary() {
   const list = $('#glossaryList');
   list.textContent = '';
-  $('#glossaryCount').textContent = `${glossary.length} từ`;
 
-  if (!glossary.length) {
-    list.appendChild(el('div', 'key-empty', 'Chưa có thuật ngữ nào.'));
+  const q = glossaryQuery.trim().toLowerCase();
+  const filtered = q
+    ? glossary.filter(e => e.source.toLowerCase().includes(q) || e.target.toLowerCase().includes(q))
+    : glossary;
+
+  $('#glossaryCount').textContent = q ? `${filtered.length}/${glossary.length} từ` : `${glossary.length} từ`;
+
+  if (!filtered.length) {
+    list.appendChild(el('div', 'key-empty', glossary.length ? 'Không có thuật ngữ khớp từ khóa.' : 'Chưa có thuật ngữ nào.'));
     return;
   }
 
-  glossary.forEach((entry, index) => {
+  filtered.forEach(entry => {
     const row = el('div', 'key-row glossary-row');
     row.appendChild(el('span', 'glossary-source', entry.source));
     row.insertAdjacentHTML('beforeend', icon('chevron', { size: 13, className: 'glossary-arrow' }));
@@ -949,7 +1456,8 @@ function renderGlossary() {
     const remove = iconButton('row-action row-action-danger', 'trash', 'Xoá', { size: 13 });
     remove.title = 'Xoá cặp từ này';
     remove.addEventListener('click', async () => {
-      glossary.splice(index, 1);
+      const idx = glossary.indexOf(entry);
+      if (idx >= 0) glossary.splice(idx, 1);
       await persistGlossary();
       renderGlossary();
       setStatus('Đã xoá cặp từ');
@@ -959,7 +1467,6 @@ function renderGlossary() {
   });
 }
 
-// Merge entries mới vào glossary, dedupe theo source (source đã có thì cập nhật target).
 async function mergeGlossary(entries) {
   let added = 0;
   for (const entry of entries) {
@@ -991,28 +1498,22 @@ async function addGlossaryEntry() {
 
 async function importGlossaryFile(file) {
   const helper = globalThis.NPT_GLOSSARY;
-  if (!helper?.parse) return setStatus('Module glossary.js chưa sẵn sàng — không import được', true);
+  if (!helper?.parse) return setStatus('Module glossary.js chưa sẵn sàng', true);
   const text = await file.text();
   const entries = helper.parse(text);
   if (!Array.isArray(entries) || !entries.length) return setStatus('Không đọc được cặp từ nào từ file này', true);
   const added = await mergeGlossary(entries);
-  setStatus(`Đã import ${entries.length} cặp từ (${added} từ mới, còn lại cập nhật/trùng)`);
+  setStatus(`Đã import ${entries.length} cặp từ (${added} từ mới, còn lại cập nhật)`);
 }
 
 function exportGlossary(format) {
   const helper = globalThis.NPT_GLOSSARY;
-  if (!helper?.serialize) return setStatus('Module glossary.js chưa sẵn sàng — không export được', true);
+  if (!helper?.serialize) return setStatus('Module glossary.js chưa sẵn sàng', true);
   if (!glossary.length) return setStatus('Glossary đang trống', true);
   const text = helper.serialize(glossary, format);
   const isJson = format === 'json';
-  const blob = new Blob([text], { type: isJson ? 'application/json' : 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = isJson ? 'glossary.json' : 'glossary.csv';
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-  setStatus(`Đã xuất ${glossary.length} từ ra ${anchor.download}`);
+  downloadFile(isJson ? 'glossary.json' : 'glossary.csv', text, isJson ? 'application/json' : 'text/csv');
+  setStatus(`Đã xuất ${glossary.length} từ`);
 }
 
 async function loadGlossary() {
@@ -1023,14 +1524,13 @@ async function loadGlossary() {
 
 /* ------------------------- Quota DeepL ------------------------- */
 
-// Một dòng quota: 'DeepL <keyMasked>: count/limit ký tự' + thanh progress theo %.
 function renderUsageRow(container, usage) {
   const row = el('div');
-  row.style.cssText = 'margin-top:8px';
+  row.style.marginTop = '8px';
 
   if (usage.error) {
     const line = el('div', 'note', `DeepL ${usage.keyMasked || ''}: ${usage.error}`);
-    line.style.cssText = 'margin:0;color:#fca5a5';
+    line.style.cssText = 'margin:0;color:var(--danger)';
     row.appendChild(line);
     container.appendChild(row);
     return;
@@ -1038,8 +1538,7 @@ function renderUsageRow(container, usage) {
 
   const count = Number(usage.count) || 0;
   const limit = Number(usage.limit) || 0;
-  const label = el('div', 'note',
-    `DeepL ${usage.keyMasked}: ${count.toLocaleString('vi-VN')}/${limit.toLocaleString('vi-VN')} ký tự`);
+  const label = el('div', 'note', `DeepL ${usage.keyMasked}${usage.disabled ? ' (tắt)' : ''}: ${count.toLocaleString('vi-VN')}/${limit.toLocaleString('vi-VN')} ký tự`);
   label.style.margin = '0';
   row.appendChild(label);
 
@@ -1069,24 +1568,35 @@ async function renderDeeplUsage() {
   for (const usage of usages) renderUsageRow(container, usage);
 }
 
-/* ------------------------- Giao diện: tab, theme ------------------------- */
+/* ------------------------- Theme & Accessible Tabs ------------------------- */
 
 function applyTheme(theme) {
   if (theme === 'dark' || theme === 'light') document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
 }
 
-function selectTab(name) {
-  for (const tab of document.querySelectorAll('.tab')) {
-    tab.setAttribute('aria-selected', String(tab.dataset.tab === name));
+function selectTab(name, { focusTab = false } = {}) {
+  const tabs = [...document.querySelectorAll('#sidebarNav .tab')];
+  for (const tab of tabs) {
+    const selected = tab.dataset.tab === name;
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected && focusTab) tab.focus();
   }
   for (const panel of document.querySelectorAll('.tabpanel')) {
     panel.hidden = panel.id !== `tab-${name}`;
   }
-  location.hash = name;
+  const meta = TAB_META[name];
+  if (meta) {
+    $('#dashSectionTitle').textContent = meta.title;
+    $('#dashSectionSub').textContent = meta.sub;
+  }
+  if (location.hash.replace('#', '') !== name) {
+    history.replaceState(null, '', `#${name}`);
+  }
 }
 
-/* ------------------------- Cache bản dịch ------------------------- */
+/* ------------------------- Cache & Backup ------------------------- */
 
 async function refreshCacheStats() {
   const result = await chrome.runtime.sendMessage({ type: 'translationCacheStats' }).catch(() => null);
@@ -1094,25 +1604,21 @@ async function refreshCacheStats() {
 }
 
 async function clearCache() {
+  const confirmed = await confirmAction({
+    title: 'Xoá toàn bộ cache bản dịch?',
+    message: 'Tất cả bản dịch đang nhớ dùng chung giữa các tab sẽ bị xoá sạch.',
+    confirmText: 'Xoá cache',
+  });
+  if (!confirmed) return;
   const result = await chrome.runtime.sendMessage({ type: 'clearTranslationCache' }).catch(() => null);
   if (!result?.ok) return setStatus(result?.error || 'Không xoá được cache', true);
-  await refreshCacheStats();
+  await Promise.all([refreshCacheStats(), refreshKeyPoolHealth()]);
   setStatus('Đã xoá cache bản dịch');
 }
 
-/* ------------------------- Sao lưu / khôi phục -------------------------
- * File backup hay bị chia sẻ hoặc đồng bộ lên cloud nên TUYỆT ĐỐI không được
- * mang theo credential.
- *
- * Dùng danh sách TRẮNG, không phải danh sách đen. Bản đầu lọc bằng danh sách
- * đen 2 phần tử và lấy nguyên chrome.storage.local.get(null) — nghĩa là bất kỳ
- * key nào không nghĩ ra lúc đó đều tự động lọt vào file. Nó lọt thật:
- * 'tm-native-en-openai-key' (Bearer key thô của bản v4.0) không bao giờ bị xoá
- * sau khi ensureConfig migrate, nên ngưởi dùng nâng cấp từ v4.0 xuất cài đặt ra
- * là kèm luôn key — trong khi UI ghi rõ "API key không nằm trong file xuất".
- * Danh sách trắng thì key mới thêm sau này mặc định KHÔNG được xuất. */
 const BACKUP_KEYS = [
   ...Object.values(PREFS_KEYS),
+  SYSTEM_PROMPT_OVERRIDE_KEY,
   TEMPLATE_KEYS.templates,
   TEMPLATE_KEYS.active,
   GLOSSARY_KEY,
@@ -1120,8 +1626,6 @@ const BACKUP_KEYS = [
   'tm-input-helper-offset',
   'tm-image-target',
 ];
-
-// Ngôn ngữ đã chọn cho từng site: 'tm-page-translator-language:<hostname>'.
 const BACKUP_KEY_PATTERN = /^tm-page-translator-language:/;
 
 function isBackupKey(key) {
@@ -1165,8 +1669,6 @@ async function importSettings(file) {
 
   const clean = {};
   for (const [key, value] of Object.entries(data)) {
-    // Đối xứng với lúc xuất: chỉ nhận đúng những key được phép, nên file do
-    // ngưởi khác đưa không thể ghi đè config API/endpoint hay nhét key lạ.
     if (!isBackupKey(key)) continue;
     clean[key] = value;
   }
@@ -1178,7 +1680,12 @@ async function importSettings(file) {
 }
 
 async function resetSettings() {
-  if (!confirm('Đưa mọi cài đặt về mặc định?\nAPI key, glossary và prompt template sẽ được GIỮ NGUYÊN.')) return;
+  const confirmed = await confirmAction({
+    title: 'Đưa cài đặt về mặc định?',
+    message: 'API key, glossary và prompt template sẽ được GIỮ NGUYÊN.\nCác tùy chọn dịch trang, TTS, cache và giao diện sẽ về mặc định.',
+    confirmText: 'Khôi phục mặc định',
+  });
+  if (!confirmed) return;
   const all = await chrome.storage.local.get(null);
   const remove = Object.keys(all).filter(key =>
     isBackupKey(key)
@@ -1190,14 +1697,67 @@ async function resetSettings() {
   setTimeout(() => location.reload(), 700);
 }
 
-for (const tab of document.querySelectorAll('.tab')) {
+/* ------------------------- Event Wiring & Boot ------------------------- */
+
+const sidebarTabs = [...document.querySelectorAll('#sidebarNav .tab')];
+sidebarTabs.forEach((tab, idx) => {
   tab.addEventListener('click', () => selectTab(tab.dataset.tab));
+  tab.addEventListener('keydown', (event) => {
+    let nextIdx = -1;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') nextIdx = (idx + 1) % sidebarTabs.length;
+    else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') nextIdx = (idx - 1 + sidebarTabs.length) % sidebarTabs.length;
+    else if (event.key === 'Home') nextIdx = 0;
+    else if (event.key === 'End') nextIdx = sidebarTabs.length - 1;
+    if (nextIdx >= 0) {
+      event.preventDefault();
+      selectTab(sidebarTabs[nextIdx].dataset.tab, { focusTab: true });
+    }
+  });
+});
+
+for (const radio of document.querySelectorAll('input[name="routingStrategy"]')) {
+  radio.addEventListener('change', () => {
+    if (!config) return;
+    config.routingStrategy = radio.value;
+    updateKpiDisplay();
+    markDirty();
+  });
 }
+
+$('#universalKeyInput')?.addEventListener('input', updateUniversalDropzonePreview);
+$('#universalAddBtn')?.addEventListener('click', commitUniversalDropzone);
+$('#universalKeyInput')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    commitUniversalDropzone();
+  }
+});
+
+$('#providerSearch')?.addEventListener('input', (event) => {
+  providerQuery = event.target.value;
+  renderProviders();
+});
+
+for (const pill of document.querySelectorAll('.filter-pill')) {
+  pill.addEventListener('click', () => {
+    providerFilter = pill.dataset.filter || 'all';
+    for (const p of document.querySelectorAll('.filter-pill')) {
+      p.setAttribute('aria-pressed', String(p === pill));
+    }
+    renderProviders();
+  });
+}
+
 $('#save').addEventListener('click', () => saveSettings().catch(error => setStatus(error.message, true)));
+$('#testAllKeys').addEventListener('click', (event) => pingKeys({ triggerBtn: event.currentTarget }).catch(error => setStatus(error.message, true)));
 $('#addCustomProvider').addEventListener('click', addCustomProvider);
 $('#testApi').addEventListener('click', () => testApi().catch(error => setStatus(error.message, true)));
 $('#preferred').addEventListener('change', () => { config.preferred = $('#preferred').value; markDirty(); });
-$('#tone').addEventListener('change', () => { config.tone = $('#tone').value; markDirty(); });
+$('#tone').addEventListener('change', () => {
+  config.tone = $('#tone').value;
+  renderPromptStudio();
+  markDirty();
+});
 $('#uiTheme').addEventListener('change', () => applyTheme($('#uiTheme').value));
 $('#cacheClear').addEventListener('click', () => clearCache().catch(error => setStatus(error.message, true)));
 $('#settingsExport').addEventListener('click', () => exportSettings().catch(error => setStatus(error.message, true)));
@@ -1209,12 +1769,34 @@ $('#settingsFile').addEventListener('change', async event => {
 });
 $('#settingsReset').addEventListener('click', () => resetSettings().catch(error => setStatus(error.message, true)));
 
-// Đóng tab khi còn thay đổi chưa lưu → cảnh báo thay vì mất im lặng.
+for (const id of ['#pageStyle', '#pageDialect', '#pageTranslateMode', '#pageDisplayMode', '#pageGrammarFix']) {
+  $(id)?.addEventListener('change', () => {
+    updatePageStylePreview();
+    renderPromptStudio();
+  });
+}
+
+$('#studioTask')?.addEventListener('change', renderPromptStudio);
+$('#studioOverrideInput')?.addEventListener('input', (event) => {
+  const task = $('#studioTask').value || 'batch';
+  studioOverrides[task] = event.target.value.slice(0, 2000);
+  renderPromptStudio();
+  markDirty();
+});
+$('#studioResetTask')?.addEventListener('click', () => {
+  const task = $('#studioTask').value || 'batch';
+  delete studioOverrides[task];
+  renderPromptStudio();
+  markDirty();
+  setStatus(`Đã khôi phục prompt mặc định cho "${task}" — nhớ bấm Lưu cài đặt`);
+});
+
 window.addEventListener('beforeunload', event => {
   if (!dirty) return;
   event.preventDefault();
   event.returnValue = '';
 });
+
 $('#refreshDeeplUsage').addEventListener('click', async event => {
   const button = event.currentTarget;
   button.disabled = true;
@@ -1224,10 +1806,13 @@ $('#refreshDeeplUsage').addEventListener('click', async event => {
     button.disabled = false;
   }
 });
-// Prompt Templates.
+
 $('#tplSave').addEventListener('click', () => saveTemplateForm().catch(error => setStatus(error.message, true)));
 $('#tplCancel').addEventListener('click', resetTemplateForm);
-// Glossary.
+$('#glossarySearch')?.addEventListener('input', (event) => {
+  glossaryQuery = event.target.value;
+  renderGlossary();
+});
 $('#glossaryAdd').addEventListener('click', () => addGlossaryEntry().catch(error => setStatus(error.message, true)));
 $('#glossaryTarget').addEventListener('keydown', event => {
   if (event.key === 'Enter') addGlossaryEntry().catch(error => setStatus(error.message, true));
@@ -1240,40 +1825,45 @@ $('#glossaryFile').addEventListener('change', async event => {
 });
 $('#glossaryExportJson').addEventListener('click', () => exportGlossary('json'));
 $('#glossaryExportCsv').addEventListener('click', () => exportGlossary('csv'));
-// TTS: hiển thị giá trị tốc độ đọc ngay khi kéo slider.
 $('#ttsRate').addEventListener('input', () => { $('#ttsRateValue').textContent = $('#ttsRate').value; });
 
-// Mọi control prefs đều bật cờ "chưa lưu" — trước đây chỉ có provider mới bẩn.
 for (const control of document.querySelectorAll('.tabpanel input, .tabpanel select, .tabpanel textarea')) {
-  if (control.type === 'file') continue;
+  if (control.type === 'file' || control.dataset.noDirty === 'true') continue;
+  if (['universalKeyInput', 'providerSearch', 'glossarySearch', 'studioTask', 'tplName', 'tplPrompt', 'glossarySource', 'glossaryTarget'].includes(control.id)) {
+    continue;
+  }
   control.addEventListener('change', markDirty);
 }
 
-/* Popup lưu ngay khi đổi, trang này lưu khi bấm nút. Mở cả hai cùng lúc thì
- * trang này đang giữ ảnh chụp cũ và sẽ ghi đè thay đổi vừa làm ở popup.
- * Quay lại tab mà chưa có gì chưa lưu → nạp lại từ storage. */
 document.addEventListener('visibilitychange', () => {
   if (document.hidden || dirty) return;
   Promise.all([loadConfig(), loadPrefs()])
     .then(() => {
       $('#tone').value = config.tone;
+      renderRoutingStrategy();
+      renderPresetBar();
       renderPreferredSelect();
       renderProviders();
+      refreshKeyPoolHealth();
       markClean();
     })
-    .catch(() => { /* nạp lại thất bại: giữ nguyên màn hình đang có */ });
+    .catch(() => {});
 });
 
 (async () => {
   try {
     $('#versionPill').textContent = `v${chrome.runtime.getManifest().version}`;
-  $('#brandLogo').innerHTML = globalThis.NPT_ICONS.logo(34);
-  globalThis.NPT_ICONS.hydrate();
+    $('#brandLogo').innerHTML = brandLogo(32);
+    globalThis.NPT_ICONS.hydrate();
     const hash = location.hash.replace('#', '');
-    if (document.querySelector(`.tab[data-tab="${CSS.escape(hash)}"]`)) selectTab(hash);
+    if (hash && document.querySelector(`#sidebarNav .tab[data-tab="${CSS.escape(hash)}"]`)) {
+      selectTab(hash);
+    }
 
     await loadConfig();
     $('#tone').value = config.tone;
+    renderRoutingStrategy();
+    renderPresetBar();
     renderPreferredSelect();
     renderProviders();
     await loadPrefs();
@@ -1283,6 +1873,7 @@ document.addEventListener('visibilitychange', () => {
     document.body.dataset.ready = 'true';
     renderDeeplUsage();
     refreshCacheStats();
+    refreshKeyPoolHealth();
   } catch (error) {
     document.body.dataset.ready = 'true';
     setStatus(error.message, true);

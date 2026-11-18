@@ -1,10 +1,32 @@
-# Native Page Translator VI / EN — Extension v4.6
+# Native Page Translator VI / EN — Extension v5.0
 
 Dịch toàn trang VI/EN và đổi tiếng Việt đang gõ thành tiếng Anh tự nhiên.
+Bản **5.0** nâng cấp kiến trúc lõi và toàn bộ giao diện quản lý: **Command Center 2 cột toàn màn hình**, hỗ trợ **16+ nhà cung cấp AI (Anthropic Claude native `/v1/messages`, Groq, OpenRouter, Cerebras, DeepSeek, xAI Grok, Mistral, Together, Fireworks, Perplexity, SiliconFlow, Cohere, Gemini, DeepL, Deploy, Custom OpenAI)**, cơ chế cân bằng tải **Smart Multi-Key Striping** theo sức khỏe/độ trễ từng key, và **Prompt Studio (`prompts.js`)** với lớp bảo vệ chống prompt-injection.
+
+## Có gì mới ở v5.0
+
+- **Command Center Dashboard (`options.html`, `dashboard.css`)** — Giao diện quản lý 2 cột chuyên sâu với Sidebar điều hướng (`tablist` hỗ trợ phím mũi tên), 4 thẻ KPI theo thời gian thực (tổng pool key, key sẵn sàng, độ trễ EMA TB, chiến lược/cache), **Universal Smart Key Dropzone** tự phân loại nhiều hãng key chỉ trong 1 lượt dán, thanh thêm nhanh 12 preset 1-click, tìm kiếm & lọc provider, bật/tắt/gắn nhãn từng key, nút ping kiểm tra 1 key hoặc toàn bộ pool, xem trước văn phong trang trực tiếp và hộp thoại `<dialog>` gốc không chặn luồng.
+- **Multi-Key Smart Striping & Telemetry (`providers.js`, `background.js`)** — Bổ sung 3 chiến lược điều phối: `smart-stripe` (chấm điểm theo EMA latency, số request `inflight` và `errorStreak` để ưu tiên key nhanh nhất, tự scale concurrency lên tới 12), `round-robin` (xoay đều tải) và `failover` (tối ưu prompt cache). Trạng thái độ trễ/cooldown được lưu an toàn dưới dạng key hash vào `chrome.storage.session`.
+- **Hệ thống Prompt lõi tách module (`prompts.js`) & Prompt Studio** — Tách toàn bộ system prompt thành module riêng kèm ranh giới chống prompt-injection (`<untrusted_input>` / `<page_context>`), khử dịch thô (de-translationese), thêm văn phong **Kỹ thuật** (`technical`) & **Học thuật** (`academic`), tự động trích dàn ý heading (`h1`/`h2`) làm ngữ cảnh trang và cho phép tùy biến từng tác vụ ngay trong **Prompt Studio**.
+- **Anthropic Claude & Vision đa hãng** — Hỗ trợ native API `/v1/messages` cho Claude (kèm Vision base64 dịch ảnh/OCR/Giải bài) và OpenRouter Vision.
+
+Bản 4.7 tập trung **tăng tốc toàn diện cơ chế dịch trang**: kiến trúc Streaming Wave Batching (TTFT giảm ~17.8× trên kịch bản mô phỏng LLM), sửa lỗi quét nhầm phần tử ẩn `display: none`, tách Read/Write DOM chống layout thrashing, 0% tải MutationObserver khi chưa dịch, singleflight/auto-split ở background, và OCR panel trong Closed Shadow DOM.
 Bản 4.6 nâng cấp toàn diện **AI Solver với Gemini 3.8 Flash, Extended Thinking (Giải toán sâu), nén ảnh crop JPEG/1600px và mở rộng ngữ cảnh thông minh**.
 Bản 4.5 tập trung vào **tối ưu tốc độ dịch Gemini & chống Rate Limit**: Viewport Priority Queue (dịch phần tầm mắt trước < 0.5s), Adaptive Concurrency Pool (3 batch song song, micro-staggering 30ms).
 Bản 4.4 thêm **dịch theo ngữ cảnh trang** cho các provider AI (Gemini/OpenAI).
 Bản 4.3 tập trung vào **tốc độ, quota và giao diện**: cache bản dịch dùng chung mọi tab, quét DOM một lượt.
+
+## Có gì mới ở v4.7
+
+**Tăng tốc dịch trang, Streaming DOM & Tối ưu nền**
+
+- **Streaming Progressive Waves (`translation-pipeline.js`)** — Không còn chờ xong *toàn bộ* mọi batch mới hiện chữ: Wave 0 gom batch đầu nhỏ (8 đoạn / 1200 ký tự với LLM) để hiển thị bản dịch đầu tiên gần như tức thì, rồi tăng dần kích thước wave sau qua worker pool song song (LLM 5, DeepL/Free 6). Khi batch AI bị lệch số phần tử JSON, hệ thống tự động chia đôi (binary split) để cứu các đoạn hợp lệ.
+- **Loại bỏ dịch thừa `display: none` & Defer Attributes** — Sửa lỗi `splitByViewport` cũ nhận nhầm phần tử ẩn `rect {0,0,0,0}` vào lượt dịch đầu, chuyển sang đọc geometry một lượt (`isElementVisiblyRendered`) và đưa cả `title`/`alt`/`placeholder`/`aria-label` ngoài màn hình vào `IntersectionObserver` (`rootMargin: 650px 0px`, đồng bộ qua `scrollend`).
+- **Two-Phase Read/Write & `scheduler.yield()`** — Gom bước đọc `getComputedStyle` trước vòng lặp ghi DOM, tách batch ghi với `yieldToMain(50ms)` để giữ mượt tương tác (INP), bổ sung CSS `contain: layout style` cho chế độ song ngữ và `content-visibility: auto` trên trình xem PDF.
+- **0% tải nền khi chưa dịch & Huỷ tức thì** — Chỉ kích hoạt `MutationObserver` khi trang đang dịch (`vi`/`en`) và ngắt hoàn toàn khi trở về `original`; đổi ngôn ngữ hoặc rời trang (`pagehide`) huỷ ngay các `requestIds` đang chờ ở background.
+- **Background Singleflight, Structured JSON & Lazy `fancy-text.js`** — Service worker gộp các request dịch trùng đang bay (vẫn tách biệt tuyệt đối tab ẩn danh), nâng cache SW lên 5000 mục, mở concurrency động 4–8 theo số key hoạt động, bật `responseMimeType: 'application/json'` cho Gemini batch/vision, và thêm fast-path ASCII cho `fancy-text.js`.
+- **OCR Panel cô lập (`ocr-panel.js`)** — Đưa khung chọn và bảng kết quả OCR vào Closed Shadow DOM Liquid Glass (tránh xung đột CSS và vòng lặp dịch nhầm), tự downscale vùng ảnh crop 4K/Retina tối đa 1800px, bỏ `alert()` chặn luồng và thêm nút "Dịch ngay".
+- Chi tiết số liệu đo Trước/Sau xem tại [`PERF.md`](PERF.md).
 
 ## Có gì mới ở v4.6
 

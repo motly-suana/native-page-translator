@@ -1,0 +1,820 @@
+/* Native Page Translator v5.0 — Command Center Dashboard
+ * Layer trên popup.css khi chạy ở options.html.
+ * Tuân thủ Modern Web Guidance:
+ *  - dark-mode: light-dark() + @supports fallback, color-scheme trên :root, không transition scrollbar-color
+ *  - size-aware-styling: @container queries theo chiều rộng vùng nội dung + @media fallback
+ *  - dialog: showModal() với dialog[open], overscroll-behavior: contain cho dialog & ::backdrop
+ *  - tabs: indicator ::after dùng border-inline-start / border-block-end rõ trong Forced Colors
+ */
+
+:root {
+  color-scheme: light dark;
+  --dash-surface: rgba(18, 22, 32, 0.78);
+  --dash-surface-elevated: rgba(25, 30, 44, 0.86);
+  --dash-sidebar-bg: rgba(12, 15, 22, 0.9);
+  --dash-border: rgba(255, 255, 255, 0.11);
+  --dash-border-strong: rgba(255, 255, 255, 0.2);
+  --dash-success: #34d399;
+  --dash-success-soft: rgba(52, 211, 153, 0.14);
+  --dash-warn-soft: rgba(251, 191, 36, 0.14);
+  --dash-danger-soft: rgba(248, 113, 113, 0.14);
+  --dash-radius-lg: 18px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --dash-surface: rgba(255, 255, 255, 0.9);
+    --dash-surface-elevated: #ffffff;
+    --dash-sidebar-bg: rgba(247, 249, 252, 0.94);
+    --dash-border: rgba(15, 23, 42, 0.12);
+    --dash-border-strong: rgba(15, 23, 42, 0.22);
+    --dash-success: #059669;
+    --dash-success-soft: rgba(5, 150, 105, 0.12);
+    --dash-warn-soft: rgba(217, 119, 6, 0.12);
+    --dash-danger-soft: rgba(220, 38, 38, 0.1);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --dash-surface: rgba(18, 22, 32, 0.78);
+  --dash-surface-elevated: rgba(25, 30, 44, 0.86);
+  --dash-sidebar-bg: rgba(12, 15, 22, 0.9);
+  --dash-border: rgba(255, 255, 255, 0.11);
+  --dash-border-strong: rgba(255, 255, 255, 0.2);
+  --dash-success: #34d399;
+  --dash-success-soft: rgba(52, 211, 153, 0.14);
+  --dash-warn-soft: rgba(251, 191, 36, 0.14);
+  --dash-danger-soft: rgba(248, 113, 113, 0.14);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --dash-surface: rgba(255, 255, 255, 0.9);
+  --dash-surface-elevated: #ffffff;
+  --dash-sidebar-bg: rgba(247, 249, 252, 0.94);
+  --dash-border: rgba(15, 23, 42, 0.12);
+  --dash-border-strong: rgba(15, 23, 42, 0.22);
+  --dash-success: #059669;
+  --dash-success-soft: rgba(5, 150, 105, 0.12);
+  --dash-warn-soft: rgba(217, 119, 6, 0.12);
+  --dash-danger-soft: rgba(220, 38, 38, 0.1);
+}
+
+@supports (color: light-dark(white, black)) {
+  :root {
+    --dash-surface: light-dark(rgba(255, 255, 255, 0.9), rgba(18, 22, 32, 0.78));
+    --dash-surface-elevated: light-dark(#ffffff, rgba(25, 30, 44, 0.88));
+    --dash-sidebar-bg: light-dark(rgba(247, 249, 252, 0.94), rgba(12, 15, 22, 0.9));
+    --dash-border: light-dark(rgba(15, 23, 42, 0.12), rgba(255, 255, 255, 0.11));
+    --dash-border-strong: light-dark(rgba(15, 23, 42, 0.22), rgba(255, 255, 255, 0.2));
+    --dash-success: light-dark(#059669, #34d399);
+    --dash-success-soft: light-dark(rgba(5, 150, 105, 0.12), rgba(52, 211, 153, 0.14));
+  }
+}
+
+/* ---------- Full-Viewport Command Center Shell ---------- */
+
+body.options-page.dashboard-body {
+  width: auto;
+  min-width: 0;
+  min-height: 100dvh;
+  padding: 0;
+  background:
+    radial-gradient(60% 45% at 15% -5%, var(--glow-1), transparent 60%),
+    radial-gradient(50% 45% at 92% 8%, var(--glow-2), transparent 55%),
+    var(--bg);
+}
+
+body.options-page.dashboard-body:not([data-ready]) .dash-shell {
+  opacity: 0;
+}
+
+.dash-shell {
+  display: grid;
+  grid-template-columns: 272px minmax(0, 1fr);
+  min-height: 100dvh;
+  width: 100%;
+  transition: opacity 180ms ease;
+}
+
+/* ---------- Sidebar ---------- */
+
+.dash-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 16px;
+  background: var(--dash-sidebar-bg);
+  border-right: 1px solid var(--dash-border);
+  backdrop-filter: blur(18px);
+}
+
+.dash-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 4px 6px;
+}
+
+.dash-brand-title {
+  font-size: 16px;
+  font-weight: 760;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--text);
+  background: none;
+  -webkit-text-fill-color: currentColor;
+}
+
+.dash-brand-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+
+.dash-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+}
+
+.dash-nav .tab {
+  position: relative;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 10px 12px 10px 14px;
+  border-radius: 11px;
+  font-size: 13px;
+  font-weight: 620;
+  gap: 10px;
+  text-align: left;
+  color: var(--text-dim);
+  background: transparent;
+}
+
+.dash-nav .tab:hover {
+  background: var(--panel-strong);
+  color: var(--text);
+}
+
+.dash-nav .tab[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: none;
+}
+
+/* Ranh giới thực 3px dùng border-inline-start để Forced Colors & mắt thường thấy rõ */
+.dash-nav .tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset-block: 7px;
+  inset-inline-start: 0;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 2px;
+}
+
+.dash-sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--dash-border);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.dash-sidebar-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.dash-sidebar-stat strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+/* ---------- Main Stage + Container Query Scope ---------- */
+
+.dashboard-stage {
+  container-type: inline-size;
+  container-name: stage;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dash-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 28px;
+  border-bottom: 1px solid var(--dash-border);
+  background: var(--card-bg);
+  backdrop-filter: blur(16px);
+}
+
+.dash-heading {
+  margin-right: auto;
+  min-width: 200px;
+}
+
+.dash-heading h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 740;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text);
+}
+
+.dash-heading p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.dash-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.dash-actions button {
+  width: auto;
+}
+
+.dash-content {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 22px 28px 42px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.dash-topbar #status {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.dash-topbar #status:empty {
+  display: none;
+}
+
+/* ---------- Cards & KPI Strip ---------- */
+
+.dash-card {
+  padding: 18px 20px;
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius-lg);
+  background: var(--dash-surface);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
+}
+
+.dash-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.kpi-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--dash-border);
+  border-radius: 14px;
+  background: var(--dash-surface-elevated);
+}
+
+.kpi-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.kpi-head .ico {
+  color: var(--accent);
+}
+
+.kpi-value {
+  font-size: 22px;
+  font-weight: 780;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* ---------- Routing Strategy Switcher ---------- */
+
+.routing-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.routing-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--dash-border);
+  border-radius: 13px;
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.routing-option:hover {
+  border-color: var(--dash-border-strong);
+  background: var(--panel-strong);
+}
+
+.routing-option input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.routing-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.routing-option:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.routing-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.routing-desc {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+/* ---------- Universal Dropzone ---------- */
+
+.dropzone-card {
+  border: 1px dashed rgba(99, 102, 241, 0.45);
+  background: linear-gradient(155deg, rgba(99, 102, 241, 0.08), rgba(59, 130, 246, 0.04));
+}
+
+.dropzone-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.dropzone-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.dropzone-foot button {
+  width: auto;
+}
+
+/* ---------- Preset Bar & Provider Filters ---------- */
+
+.preset-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.preset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  padding: 6px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--dash-border);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.preset-chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.preset-chip.is-added {
+  border-color: var(--dash-success);
+  background: var(--dash-success-soft);
+}
+
+.provider-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.search-box {
+  position: relative;
+  flex: 1 1 220px;
+  max-width: 340px;
+}
+
+.search-box .search-ico {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.search-box input {
+  padding-left: 32px;
+}
+
+.filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filter-pill {
+  width: auto;
+  padding: 6px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--dash-border);
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.filter-pill[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* ---------- Provider Cards & Key Health ---------- */
+
+.provider-grid-wrap {
+  container-type: inline-size;
+  container-name: providers-zone;
+}
+
+.dash-provider-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+.dash-provider-grid .provider-card {
+  margin: 0;
+  border: 1px solid var(--dash-border);
+  background: var(--dash-surface-elevated);
+}
+
+.provider-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.pill-vision {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--link);
+  font-weight: 650;
+}
+
+.key-row-v5 {
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.key-enable-toggle {
+  width: auto !important;
+  margin: 0;
+  cursor: pointer;
+}
+
+.key-label-btn {
+  width: auto;
+  padding: 2px 7px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  border: 1px dashed transparent;
+  background: transparent;
+}
+
+.key-label-btn:hover {
+  border-color: var(--dash-border-strong);
+  color: var(--text);
+}
+
+.health-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.health-pill[data-health="ok"] {
+  background: var(--dash-success-soft);
+  color: var(--dash-success);
+}
+
+.health-pill[data-health="warn"] {
+  background: var(--dash-warn-soft);
+  color: var(--warning);
+}
+
+.health-pill[data-health="err"] {
+  background: var(--dash-danger-soft);
+  color: var(--danger);
+}
+
+.health-pill[data-health="idle"] {
+  background: var(--panel);
+  color: var(--text-faint);
+}
+
+.health-pill[data-health="off"] {
+  background: var(--panel);
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+/* ---------- Page Style Live Preview & Prompt Studio ---------- */
+
+.split-2col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+.preview-card {
+  padding: 14px 16px;
+  border: 1px solid var(--dash-border);
+  border-radius: 13px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.preview-sample-box {
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-soft);
+  background: var(--dash-surface-elevated);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.preview-source {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px dashed var(--hairline-soft);
+}
+
+.preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.studio-preview-pre {
+  margin: 0;
+  padding: 12px;
+  border-radius: 11px;
+  border: 1px solid var(--hairline-soft);
+  background: var(--option-bg);
+  color: var(--text-dim);
+  font: 11.5px/1.55 ui-monospace, "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 290px;
+  overflow: auto;
+}
+
+/* ---------- Native <dialog> Confirmation Modal ---------- */
+
+dialog.confirm-dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 20px 22px;
+  border: 1px solid var(--dash-border-strong);
+  border-radius: 18px;
+  background: var(--dash-surface-elevated);
+  color: var(--text);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55);
+}
+
+dialog.confirm-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+dialog.confirm-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.confirm-dialog::backdrop {
+  background: rgba(5, 8, 15, 0.65);
+  backdrop-filter: blur(5px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.confirm-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 740;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.confirm-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-line;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.confirm-actions button {
+  width: auto;
+  min-width: 96px;
+}
+
+/* ---------- Container Queries + Viewport Fallbacks ---------- */
+
+@media (min-width: 1080px) {
+  .kpi-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .routing-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .split-2col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .dash-provider-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@supports (container-type: inline-size) {
+  @container stage (max-width: 820px) {
+    .kpi-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .routing-grid,
+    .split-2col {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @container stage (min-width: 821px) {
+    .kpi-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .routing-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .split-2col {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @container providers-zone (min-width: 840px) {
+    .dash-provider-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @container providers-zone (max-width: 839px) {
+    .dash-provider-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+}
+
+@media (max-width: 920px) {
+  .dash-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-sidebar {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--dash-border);
+    padding: 14px 16px;
+  }
+
+  .dash-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 4px;
+  }
+
+  .dash-nav .tab {
+    width: auto;
+    white-space: nowrap;
+    padding: 8px 12px;
+  }
+
+  .dash-nav .tab[aria-selected="true"]::after {
+    inset-block: auto 0;
+    inset-inline: 8px;
+    border-inline-start: 0;
+    border-block-end: 2.5px solid var(--accent);
+  }
+
+  .dash-sidebar-foot {
+    display: none;
+  }
+
+  .dash-topbar,
+  .dash-content {
+    padding-inline: 16px;
+  }
+}

@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Native Page Translator</title>
   <link rel="stylesheet" href="popup.css">
 </head>
@@ -12,8 +13,11 @@
       <span id="brandLogo" class="brand-logo-slot"></span>
       <div class="brand-text">
         <h1>Native Translator</h1>
-        <span class="brand-sub">VI ⇄ EN · dịch bản địa</span>
+        <span class="brand-sub">VI ⇄ EN · Multi-Key Engine</span>
       </div>
+      <button id="openDashboard" class="header-icon-btn" type="button" title="Mở Command Center" aria-label="Mở Command Center">
+        <i class="ico" data-icon="sliders" data-icon-size="14"></i>
+      </button>
       <span id="versionPill" class="version-pill">v—</span>
     </header>
 
@@ -51,9 +55,9 @@
     </section>
 
     <nav class="tabs" role="tablist" aria-label="Nhóm cài đặt nhanh">
-      <button class="tab" role="tab" type="button" data-tab="page" aria-selected="true" aria-controls="tab-page" id="tabbtn-page"><i class="ico" data-icon="page" data-icon-size="15"></i>Dịch trang</button>
-      <button class="tab" role="tab" type="button" data-tab="input" aria-selected="false" aria-controls="tab-input" id="tabbtn-input"><i class="ico" data-icon="wand" data-icon-size="15"></i>Nút EN</button>
-      <button class="tab" role="tab" type="button" data-tab="api" aria-selected="false" aria-controls="tab-api" id="tabbtn-api"><i class="ico" data-icon="key" data-icon-size="15"></i>API</button>
+      <button class="tab" role="tab" type="button" data-tab="page" aria-selected="true" tabindex="0" id="tabbtn-page"><i class="ico" data-icon="page" data-icon-size="15"></i>Dịch trang</button>
+      <button class="tab" role="tab" type="button" data-tab="input" aria-selected="false" tabindex="-1" id="tabbtn-input"><i class="ico" data-icon="wand" data-icon-size="15"></i>Nút EN</button>
+      <button class="tab" role="tab" type="button" data-tab="api" aria-selected="false" tabindex="-1" id="tabbtn-api"><i class="ico" data-icon="key" data-icon-size="15"></i>API &amp; Pool</button>
     </nav>
 
     <section id="tab-page" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-page">
@@ -78,6 +82,8 @@
         <option value="game-chat">Chat game</option>
         <option value="genz">Văn phong Gen Z</option>
         <option value="formal">Lịch sự, trang trọng</option>
+        <option value="technical">Kỹ thuật / Công nghệ</option>
+        <option value="academic">Học thuật / Nghiên cứu</option>
       </select>
 
       <label for="pageDialect" class="small-label"><i class="ico" data-icon="globe" data-icon-size="13"></i>Phương ngữ (chỉ khi đích là tiếng Anh)</label>
@@ -110,6 +116,7 @@
         <option value="natural">Tự nhiên — bám văn phong gốc</option>
         <option value="professional">Trang trọng — email, công việc</option>
         <option value="casual">Thân mật — chat, bạn bè</option>
+        <option value="technical">Kỹ thuật — issue GitHub, code review</option>
       </select>
 
       <label class="check"><input id="fallbackQuick" type="checkbox"><i class="ico check-ico" data-icon="refresh" data-icon-size="14"></i>Tự dịch miễn phí khi API riêng lỗi</label>
@@ -118,10 +125,24 @@
 
     <section id="tab-api" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-api" hidden>
       <p id="providerStatus" class="note">Đang tải…</p>
+      <div class="row two quick-engine-row">
+        <div>
+          <label for="quickPreferred" class="small-label"><i class="ico" data-icon="cpu" data-icon-size="12"></i>Ưu tiên</label>
+          <select id="quickPreferred"></select>
+        </div>
+        <div>
+          <label for="quickStrategy" class="small-label"><i class="ico" data-icon="activity" data-icon-size="12"></i>Điều phối</label>
+          <select id="quickStrategy">
+            <option value="smart-stripe">Smart Stripe</option>
+            <option value="round-robin">Round-Robin</option>
+            <option value="failover">Failover</option>
+          </select>
+        </div>
+      </div>
       <div id="quotaBox" class="quota-box" hidden></div>
       <div class="row two action-row">
         <button id="testApi" type="button"><i class="ico" data-icon="zap"></i>Test API</button>
-        <button id="openOptions" class="primary" type="button"><i class="ico" data-icon="sliders"></i>Quản lý key</button>
+        <button id="openOptions" class="primary" type="button"><i class="ico" data-icon="sliders"></i>Command Center</button>
       </div>
 
       <label for="uiTheme" class="small-label"><i class="ico" data-icon="moon" data-icon-size="13"></i>Giao diện</label>
@@ -131,10 +152,11 @@
         <option value="light">Luôn sáng</option>
       </select>
 
-      <p class="note"><i class="ico" data-icon="shield" data-icon-size="13"></i>Mặc định là <strong>DeepL Free</strong> (key dùng chung, quota chia sẻ). Thêm key riêng trong <strong>Quản lý key</strong> để ổn định và riêng tư hơn. Key chỉ lưu trong extension — gỡ extension là xoá sạch.</p>
+      <p class="note"><i class="ico" data-icon="shield" data-icon-size="13"></i>Hỗ trợ 16+ AI Providers (Claude, Gemini, Groq, OpenRouter, DeepSeek…). Key chỉ lưu cục bộ trong extension.</p>
     </section>
   </main>
   <script src="icons.js"></script>
+  <script src="prompts.js"></script>
   <script src="providers.js"></script>
   <script src="popup.js"></script>
 </body>

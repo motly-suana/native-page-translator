@@ -1,7 +1,7 @@
 /* Popup — tác vụ nhanh: dịch trang, chọn chế độ, xem trạng thái provider. */
 'use strict';
 
-const { CONFIG_STORAGE_KEY, normalizeConfig } = globalThis.NPT_PROVIDERS;
+const { CONFIG_STORAGE_KEY, PAGE_STYLES, normalizeConfig } = globalThis.NPT_PROVIDERS;
 
 const KEYS = {
   defaultMode: 'tm-native-en-default-mode',
@@ -19,14 +19,23 @@ const BLACKLIST_KEY = 'tm-site-blacklist';
 const THEME_KEY = 'tm-ui-theme';
 
 // Giá trị hợp lệ của văn phong trang — sai thì về 'natural' theo contract.
-const PAGE_STYLE_VALUES = ['natural', 'casual', 'work-email', 'game-chat', 'genz', 'formal'];
+const PAGE_STYLE_VALUES = Object.keys(PAGE_STYLES || {
+  natural: 1,
+  casual: 1,
+  'work-email': 1,
+  'game-chat': 1,
+  genz: 1,
+  formal: 1,
+  technical: 1,
+  academic: 1,
+});
 
 // Contract chung: danh sách template + template đang dùng (quản lý đầy đủ ở trang Cài đặt).
 const TEMPLATE_KEYS = { templates: 'tm-prompt-templates', active: 'tm-active-template' };
 
 // Đúng thứ tự content_scripts trong manifest — reinjection thiếu file nào thì
 // tính năng của file đó chết lặng lẽ sau khi khôi phục.
-const CONTENT_SCRIPT_FILES = ['icons.js', 'fancy-text.js', 'glossary.js', 'doc-detect.js', 'tts.js', 'content.js', 'qa-solver.js'];
+const CONTENT_SCRIPT_FILES = ['icons.js', 'fancy-text.js', 'glossary.js', 'doc-detect.js', 'tts.js', 'translation-pipeline.js', 'ocr-panel.js', 'content.js', 'qa-solver.js'];
 
 // Trang hiện tại: đọc từ content script chứ không đoán theo lần bấm gần nhất.
 let activeTab = null;
@@ -286,25 +295,61 @@ async function saveTheme() {
   await chrome.storage.local.set({ [THEME_KEY]: theme });
 }
 
-async function loadProviderStatus() {
+function renderProviderStatusSummary(result) {
   const element = $('#providerStatus');
-  const result = await chrome.runtime.sendMessage({ type: 'getProviderStatus' }).catch(() => null);
   if (!result) {
-    // Service worker vừa ngủ dậy / message thất bại — KHÔNG phải "chưa có key".
     element.textContent = 'Không liên lạc được service worker — mở lại popup để thử lại.';
     return;
   }
+
+  const prefSelect = $('#quickPreferred');
+  const stratSelect = $('#quickStrategy');
+  if (prefSelect && result.providers) {
+    prefSelect.textContent = '';
+    for (const [id, info] of Object.entries(result.providers)) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = `${info.label || id}${info.keyCount ? ` (${info.activeKeyCount ?? info.keyCount})` : ''}`;
+      prefSelect.appendChild(opt);
+    }
+    if (result.preferred) prefSelect.value = result.preferred;
+  }
+  if (stratSelect && result.routingStrategy) {
+    stratSelect.value = result.routingStrategy;
+  }
+
   if (!result.ok || !result.configured) {
-    element.textContent = 'Chưa cấu hình provider nào — bấm "Quản lý key" để thêm API key.';
+    element.textContent = 'Chưa cấu hình provider nào — bấm "Command Center" để thêm API key.';
     return;
   }
 
   const parts = result.active.map(id => {
     const provider = result.providers[id];
-    return `${provider?.label || id} (${provider?.keyCount || 0} key)`;
+    const activeCnt = provider?.activeKeyCount ?? provider?.keyCount ?? 0;
+    return `${provider?.label || id} (${activeCnt} key)`;
   });
-  element.textContent = `Đang dùng: ${parts.join(' → ')}`;
-  loadQuota().catch(() => {});
+  const healthyInfo = Number.isInteger(result.totalHealthyKeys)
+    ? ` · ${result.totalHealthyKeys}/${result.totalActiveKeys} sẵn sàng`
+    : '';
+  element.textContent = `Đang dùng: ${parts.join(' → ')}${healthyInfo}`;
+}
+
+async function loadProviderStatus() {
+  const result = await chrome.runtime.sendMessage({ type: 'getProviderStatus' }).catch(() => null);
+  renderProviderStatusSummary(result);
+  if (result?.ok && result?.configured) loadQuota().catch(() => {});
+}
+
+async function onQuickSwitchEngine() {
+  const preferred = $('#quickPreferred')?.value;
+  const routingStrategy = $('#quickStrategy')?.value;
+  const res = await chrome.runtime.sendMessage({
+    type: 'quickSwitchEngine',
+    payload: { preferred, routingStrategy },
+  });
+  if (!res?.ok) throw new Error(res?.error || 'Không đổi được engine');
+  renderProviderStatusSummary(res);
+  setStatus('Đã cập nhật Engine / Điều phối');
 }
 
 // Quota DeepL ngay trong popup: trước đây phải mở trang Cài đặt mới thấy.
@@ -375,9 +420,12 @@ async function testApi() {
 
 /* ------------------------- Tabs ------------------------- */
 
-function selectTab(name) {
+function selectTab(name, { focusTab = false } = {}) {
   for (const tab of document.querySelectorAll('.tab')) {
-    tab.setAttribute('aria-selected', String(tab.dataset.tab === name));
+    const selected = tab.dataset.tab === name;
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected && focusTab) tab.focus();
   }
   for (const panel of document.querySelectorAll('.tabpanel')) {
     panel.hidden = panel.id !== `tab-${name}`;
@@ -487,12 +535,27 @@ $('#siteAuto').addEventListener('change', () => onSiteAutoChange().catch(setErro
 $('#siteBlocked').addEventListener('change', () => onSiteBlockChange().catch(setError));
 $('#testApi').addEventListener('click', () => testApi().catch(setError));
 $('#openOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
+$('#openDashboard')?.addEventListener('click', () => chrome.runtime.openOptionsPage());
+$('#quickPreferred')?.addEventListener('change', () => onQuickSwitchEngine().catch(setError));
+$('#quickStrategy')?.addEventListener('change', () => onQuickSwitchEngine().catch(setError));
 $('#templateSwitch').addEventListener('change', () => onTemplateSwitch().catch(setError));
 $('#btnSummarize').addEventListener('click', () => summarizePage().catch(setError));
 
-for (const tab of document.querySelectorAll('.tab')) {
+const popupTabs = [...document.querySelectorAll('.tabs .tab')];
+popupTabs.forEach((tab, idx) => {
   tab.addEventListener('click', () => selectTab(tab.dataset.tab));
-}
+  tab.addEventListener('keydown', (event) => {
+    let nextIdx = -1;
+    if (event.key === 'ArrowRight') nextIdx = (idx + 1) % popupTabs.length;
+    else if (event.key === 'ArrowLeft') nextIdx = (idx - 1 + popupTabs.length) % popupTabs.length;
+    else if (event.key === 'Home') nextIdx = 0;
+    else if (event.key === 'End') nextIdx = popupTabs.length - 1;
+    if (nextIdx >= 0) {
+      event.preventDefault();
+      selectTab(popupTabs[nextIdx].dataset.tab, { focusTab: true });
+    }
+  });
+});
 
 async function boot() {
   // Theme trước tiên, rồi mới hiện thân trang: đọc storage xong mới render tránh

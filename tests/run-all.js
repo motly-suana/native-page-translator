@@ -18,6 +18,7 @@ const SYNTAX_CHECK_FILES = [
   'background.js',
   'icons.js',
   'content.js',
+  'prompts.js',
   'providers.js',
   'popup.js',
   'options.js',
@@ -26,6 +27,8 @@ const SYNTAX_CHECK_FILES = [
   'glossary.js',
   'doc-detect.js',
   'tts.js',
+  'translation-pipeline.js',
+  'ocr-panel.js',
   'qa-solver.js',
 ];
 
