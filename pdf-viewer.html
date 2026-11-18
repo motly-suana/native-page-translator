@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Dịch PDF — Native Page Translator</title>
   <style>
     * { box-sizing: border-box; }
@@ -20,7 +21,7 @@
       --danger: #f87171;
       --warn: #fbbf24;
       --header-bg: rgba(13, 16, 23, 0.92);
-      color-scheme: dark;
+      color-scheme: light dark;
     }
     @media (prefers-color-scheme: light) {
       :root:not([data-theme="dark"]) {
@@ -51,6 +52,9 @@
       --warn: #a16207;
       --header-bg: rgba(255, 255, 255, 0.92);
       color-scheme: light;
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
@@ -85,7 +89,7 @@
       font-size: 20px;
       font-weight: 760;
       letter-spacing: -0.02em;
-      background: linear-gradient(100deg, #fff 30%, #a5b4fc 90%);
+      background: linear-gradient(100deg, var(--text) 30%, var(--accent) 90%);
       -webkit-background-clip: text;
       background-clip: text;
       color: transparent;
@@ -113,10 +117,9 @@
       cursor: pointer;
       transition: border-color 0.25s, background 0.25s;
     }
-    .file-btn:hover, button:hover, select:hover { background: rgba(255, 255, 255, 0.08); }
+    .file-btn:hover, button:hover, select:hover { background: var(--hairline); }
     select { cursor: pointer; }
-    /* Option list render native nền trắng → ép nền tối đặc, tránh chữ trắng trên nền trắng */
-    select option { background: #141821; color: var(--text); }
+    select option { background: var(--bg); color: var(--text); }
     .source-name {
       overflow: hidden;
       max-width: 340px;
@@ -129,7 +132,7 @@
       height: 5px;
       margin-top: 12px;
       border-radius: 99px;
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--hairline);
       overflow: hidden;
     }
     .progress-fill {
@@ -168,7 +171,14 @@
       margin: 0 auto;
       padding: 10px 20px 60px;
     }
-    .page-block { margin-top: 26px; }
+    .page-block {
+      margin-top: 26px;
+      content-visibility: auto;
+      contain-intrinsic-size: auto 320px auto 640px;
+    }
+    @supports not (content-visibility: auto) {
+      .page-block { contain: layout style paint; }
+    }
     .page-heading {
       margin: 0 0 10px;
       padding-bottom: 6px;
@@ -248,11 +258,11 @@
     <div class="controls">
       <label class="file-btn"><i class="ico" data-icon="file" data-icon-size="15"></i>Chọn file PDF…<input id="fileInput" type="file" accept="application/pdf,.pdf" hidden></label>
       <span id="sourceName" class="source-name"><i class="ico" data-icon="doc" data-icon-size="13"></i>Chưa có nguồn</span>
-      <select id="targetLang" title="Ngôn ngữ đích">
+      <select id="targetLang" title="Ngôn ngữ đích" aria-label="Ngôn ngữ đích">
         <option value="vi">Dịch sang Tiếng Việt</option>
         <option value="en">Dịch sang Tiếng Anh</option>
       </select>
-      <select id="viewMode" title="Chế độ hiển thị">
+      <select id="viewMode" title="Chế độ hiển thị" aria-label="Chế độ hiển thị">
         <option value="bilingual">Song ngữ</option>
         <option value="translation">Chỉ bản dịch</option>
         <option value="original">Chỉ gốc</option>

@@ -24,7 +24,10 @@
 
   const REVERSE = new Map(); // glyph -> { ch, style }
   const FORWARD = new Map(); // styleId -> Map(ascii -> glyph)
-  for (const id of STYLE_IDS) FORWARD.set(id, new Map());
+  let tablesInitialized = false;
+
+  // Fast-path: mọi glyph fancy nằm trong các block Unicode này (không xuất hiện ở VI/EN chuẩn).
+  const HAS_FANCY_CANDIDATE_RE = /[\u00B2\u00B3\u00B9\u0250-\u02FF\u1D00-\u1DBF\u2070-\u209F\u2100-\u214F\u2460-\u24FF\uA730-\uA7FF\uFF10-\uFF5A]|\uD835[\uDC00-\uDFFF]|\uD83C[\uDD30-\uDD89]/;
 
   function register(style, asciiChar, codepoint) {
     const glyph = String.fromCodePoint(codepoint);
@@ -42,91 +45,6 @@
     }
   }
 
-  const A = 65; // 'A'
-  const a = 97; // 'a'
-  const D0 = 48; // '0'
-
-  /* --- Mathematical Alphanumeric Symbols (1D400–1D7FF) ---
-   * Một số block có "lỗ" (codepoint reserved) — ký tự đó nằm ở block
-   * Letterlike Symbols (21xx) nên map riêng qua OVERRIDES. */
-  const HOLES = new Set([
-    0x1D455, // italic h (thật: 210E)
-    0x1D49D, 0x1D4A0, 0x1D4A1, 0x1D4A3, 0x1D4A4, 0x1D4A7, 0x1D4A8, 0x1D4AD, // script B E F H I L M R
-    0x1D4BA, 0x1D4BC, 0x1D4C4, // script e g o
-    0x1D506, 0x1D50B, 0x1D50C, 0x1D515, 0x1D51D, // fraktur C H I R Z
-    0x1D53A, 0x1D53F, 0x1D545, 0x1D547, 0x1D548, 0x1D549, 0x1D551, // doubleStruck C H N P Q R Z
-  ]);
-
-  const MATH_STYLES = {
-    bold: { upper: 0x1D400, lower: 0x1D41A, digits: 0x1D7CE },
-    italic: { upper: 0x1D434, lower: 0x1D44E },
-    boldItalic: { upper: 0x1D468, lower: 0x1D482 },
-    script: { upper: 0x1D49C, lower: 0x1D4B6 },
-    boldScript: { upper: 0x1D4D0, lower: 0x1D4EA },
-    fraktur: { upper: 0x1D504, lower: 0x1D51E },
-    doubleStruck: { upper: 0x1D538, lower: 0x1D552, digits: 0x1D7D8 },
-    boldFraktur: { upper: 0x1D56C, lower: 0x1D586 },
-    sans: { upper: 0x1D5A0, lower: 0x1D5BA, digits: 0x1D7E2 },
-    sansBold: { upper: 0x1D5D4, lower: 0x1D5EE, digits: 0x1D7EC },
-    sansItalic: { upper: 0x1D608, lower: 0x1D622 },
-    sansBoldItalic: { upper: 0x1D63C, lower: 0x1D656 },
-    monospace: { upper: 0x1D670, lower: 0x1D68A, digits: 0x1D7F6 },
-  };
-
-  const MATH_OVERRIDES = {
-    italic: { h: 0x210E },
-    script: { B: 0x212C, E: 0x2130, F: 0x2131, H: 0x210B, I: 0x2110, L: 0x2112, M: 0x2133, R: 0x211B, e: 0x212F, g: 0x210A, o: 0x2134 },
-    fraktur: { C: 0x212D, H: 0x210C, I: 0x2111, R: 0x211C, Z: 0x2128 },
-    doubleStruck: { C: 0x2102, H: 0x210D, N: 0x2115, P: 0x2119, Q: 0x211A, R: 0x211D, Z: 0x2124 },
-  };
-
-  for (const [style, ranges] of Object.entries(MATH_STYLES)) {
-    registerRange(style, ranges.upper, A, 26, HOLES);
-    registerRange(style, ranges.lower, a, 26, HOLES);
-    if (ranges.digits) registerRange(style, ranges.digits, D0, 10, HOLES);
-    for (const [ch, cp] of Object.entries(MATH_OVERRIDES[style] || {})) register(style, ch, cp);
-  }
-
-  /* --- Các block rồi --- */
-  registerRange('fullwidth', 0xFF21, A, 26);
-  registerRange('fullwidth', 0xFF41, a, 26);
-  registerRange('fullwidth', 0xFF10, D0, 10);
-
-  registerRange('circled', 0x24B6, A, 26);
-  registerRange('circled', 0x24D0, a, 26);
-  register('circled', '0', 0x24EA);
-  for (let i = 1; i <= 9; i++) register('circled', String.fromCharCode(D0 + i), 0x2460 + i - 1);
-
-  registerRange('negativeCircled', 0x1F150, A, 26); // 🅐 — chỉ có hoa
-  registerRange('squared', 0x1F130, A, 26); // 🄰 — chỉ có hoa
-  registerRange('parenthesized', 0x249C, a, 26); // ⓐ — chỉ có thường
-
-  // Chỉ có 1 dạng hoa → hướng cả chữ thường về glyph hoa (và ngược lại).
-  for (const style of ['negativeCircled', 'squared']) {
-    for (let i = 0; i < 26; i++) {
-      FORWARD.get(style).set(String.fromCharCode(a + i), FORWARD.get(style).get(String.fromCharCode(A + i)));
-    }
-  }
-  for (let i = 0; i < 26; i++) {
-    FORWARD.get('parenthesized').set(String.fromCharCode(A + i), FORWARD.get('parenthesized').get(String.fromCharCode(a + i)));
-  }
-
-  /* --- Bảng chữ rải rác (small caps / superscript / subscript) --- */
-  const SMALL_CAPS = {
-    a: 'ᴀ', b: 'ʙ', c: 'ᴄ', d: 'ᴅ', e: 'ᴇ', f: 'ꜰ', g: 'ɢ', h: 'ʜ', i: 'ɪ', j: 'ᴊ', k: 'ᴋ', l: 'ʟ', m: 'ᴍ',
-    n: 'ɴ', o: 'ᴏ', p: 'ᴘ', q: 'ꞯ', r: 'ʀ', s: 'ꜱ', t: 'ᴛ', u: 'ᴜ', v: 'ᴠ', w: 'ᴡ', x: 'x', y: 'ʏ', z: 'ᴢ',
-  };
-  const SUPERSCRIPT = {
-    a: 'ᵃ', b: 'ᵇ', c: 'ᶜ', d: 'ᵈ', e: 'ᵉ', f: 'ᶠ', g: 'ᵍ', h: 'ʰ', i: 'ⁱ', j: 'ʲ', k: 'ᵏ', l: 'ˡ', m: 'ᵐ',
-    n: 'ⁿ', o: 'ᵒ', p: 'ᵖ', r: 'ʳ', s: 'ˢ', t: 'ᵗ', u: 'ᵘ', v: 'ᵛ', w: 'ʷ', x: 'ˣ', y: 'ʸ', z: 'ᶻ',
-    '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
-  };
-  const SUBSCRIPT = {
-    a: 'ₐ', e: 'ₑ', h: 'ₕ', i: 'ᵢ', j: 'ⱼ', k: 'ₖ', l: 'ₗ', m: 'ₘ', n: 'ₙ', o: 'ₒ', p: 'ₚ', r: 'ᵣ',
-    s: 'ₛ', t: 'ₜ', u: 'ᵤ', v: 'ᵥ', x: 'ₓ',
-    '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
-  };
-
   function registerAlphabet(style, table, bothCases) {
     for (const [ch, glyph] of Object.entries(table)) {
       const codepoints = [...glyph];
@@ -138,9 +56,102 @@
       }
     }
   }
-  registerAlphabet('smallCaps', SMALL_CAPS, true);
-  registerAlphabet('superscript', SUPERSCRIPT, true);
-  registerAlphabet('subscript', SUBSCRIPT, true);
+
+  function ensureTables() {
+    if (tablesInitialized) return;
+    tablesInitialized = true;
+
+    for (const id of STYLE_IDS) FORWARD.set(id, new Map());
+
+    const A = 65; // 'A'
+    const a = 97; // 'a'
+    const D0 = 48; // '0'
+
+    /* --- Mathematical Alphanumeric Symbols (1D400–1D7FF) ---
+     * Một số block có "lỗ" (codepoint reserved) — ký tự đó nằm ở block
+     * Letterlike Symbols (21xx) nên map riêng qua OVERRIDES. */
+    const HOLES = new Set([
+      0x1D455, // italic h (thật: 210E)
+      0x1D49D, 0x1D4A0, 0x1D4A1, 0x1D4A3, 0x1D4A4, 0x1D4A7, 0x1D4A8, 0x1D4AD, // script B E F H I L M R
+      0x1D4BA, 0x1D4BC, 0x1D4C4, // script e g o
+      0x1D506, 0x1D50B, 0x1D50C, 0x1D515, 0x1D51D, // fraktur C H I R Z
+      0x1D53A, 0x1D53F, 0x1D545, 0x1D547, 0x1D548, 0x1D549, 0x1D551, // doubleStruck C H N P Q R Z
+    ]);
+
+    const MATH_STYLES = {
+      bold: { upper: 0x1D400, lower: 0x1D41A, digits: 0x1D7CE },
+      italic: { upper: 0x1D434, lower: 0x1D44E },
+      boldItalic: { upper: 0x1D468, lower: 0x1D482 },
+      script: { upper: 0x1D49C, lower: 0x1D4B6 },
+      boldScript: { upper: 0x1D4D0, lower: 0x1D4EA },
+      fraktur: { upper: 0x1D504, lower: 0x1D51E },
+      doubleStruck: { upper: 0x1D538, lower: 0x1D552, digits: 0x1D7D8 },
+      boldFraktur: { upper: 0x1D56C, lower: 0x1D586 },
+      sans: { upper: 0x1D5A0, lower: 0x1D5BA, digits: 0x1D7E2 },
+      sansBold: { upper: 0x1D5D4, lower: 0x1D5EE, digits: 0x1D7EC },
+      sansItalic: { upper: 0x1D608, lower: 0x1D622 },
+      sansBoldItalic: { upper: 0x1D63C, lower: 0x1D656 },
+      monospace: { upper: 0x1D670, lower: 0x1D68A, digits: 0x1D7F6 },
+    };
+
+    const MATH_OVERRIDES = {
+      italic: { h: 0x210E },
+      script: { B: 0x212C, E: 0x2130, F: 0x2131, H: 0x210B, I: 0x2110, L: 0x2112, M: 0x2133, R: 0x211B, e: 0x212F, g: 0x210A, o: 0x2134 },
+      fraktur: { C: 0x212D, H: 0x210C, I: 0x2111, R: 0x211C, Z: 0x2128 },
+      doubleStruck: { C: 0x2102, H: 0x210D, N: 0x2115, P: 0x2119, Q: 0x211A, R: 0x211D, Z: 0x2124 },
+    };
+
+    for (const [style, ranges] of Object.entries(MATH_STYLES)) {
+      registerRange(style, ranges.upper, A, 26, HOLES);
+      registerRange(style, ranges.lower, a, 26, HOLES);
+      if (ranges.digits) registerRange(style, ranges.digits, D0, 10, HOLES);
+      for (const [ch, cp] of Object.entries(MATH_OVERRIDES[style] || {})) register(style, ch, cp);
+    }
+
+    /* --- Các block rời --- */
+    registerRange('fullwidth', 0xFF21, A, 26);
+    registerRange('fullwidth', 0xFF41, a, 26);
+    registerRange('fullwidth', 0xFF10, D0, 10);
+
+    registerRange('circled', 0x24B6, A, 26);
+    registerRange('circled', 0x24D0, a, 26);
+    register('circled', '0', 0x24EA);
+    for (let i = 1; i <= 9; i++) register('circled', String.fromCharCode(D0 + i), 0x2460 + i - 1);
+
+    registerRange('negativeCircled', 0x1F150, A, 26); // 🅐 — chỉ có hoa
+    registerRange('squared', 0x1F130, A, 26); // 🄰 — chỉ có hoa
+    registerRange('parenthesized', 0x249C, a, 26); // ⓐ — chỉ có thường
+
+    // Chỉ có 1 dạng hoa → hướng cả chữ thường về glyph hoa (và ngược lại).
+    for (const style of ['negativeCircled', 'squared']) {
+      for (let i = 0; i < 26; i++) {
+        FORWARD.get(style).set(String.fromCharCode(a + i), FORWARD.get(style).get(String.fromCharCode(A + i)));
+      }
+    }
+    for (let i = 0; i < 26; i++) {
+      FORWARD.get('parenthesized').set(String.fromCharCode(A + i), FORWARD.get('parenthesized').get(String.fromCharCode(a + i)));
+    }
+
+    /* --- Bảng chữ rải rác (small caps / superscript / subscript) --- */
+    const SMALL_CAPS = {
+      a: 'ᴀ', b: 'ʙ', c: 'ᴄ', d: 'ᴅ', e: 'ᴇ', f: 'ꜰ', g: 'ɢ', h: 'ʜ', i: 'ɪ', j: 'ᴊ', k: 'ᴋ', l: 'ʟ', m: 'ᴍ',
+      n: 'ɴ', o: 'ᴏ', p: 'ᴘ', q: 'ꞯ', r: 'ʀ', s: 'ꜱ', t: 'ᴛ', u: 'ᴜ', v: 'ᴠ', w: 'ᴡ', x: 'x', y: 'ʏ', z: 'ᴢ',
+    };
+    const SUPERSCRIPT = {
+      a: 'ᵃ', b: 'ᵇ', c: 'ᶜ', d: 'ᵈ', e: 'ᵉ', f: 'ᶠ', g: 'ᵍ', h: 'ʰ', i: 'ⁱ', j: 'ʲ', k: 'ᵏ', l: 'ˡ', m: 'ᵐ',
+      n: 'ⁿ', o: 'ᵒ', p: 'ᵖ', r: 'ʳ', s: 'ˢ', t: 'ᵗ', u: 'ᵘ', v: 'ᵛ', w: 'ʷ', x: 'ˣ', y: 'ʸ', z: 'ᶻ',
+      '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+    };
+    const SUBSCRIPT = {
+      a: 'ₐ', e: 'ₑ', h: 'ₕ', i: 'ᵢ', j: 'ⱼ', k: 'ₖ', l: 'ₗ', m: 'ₘ', n: 'ₙ', o: 'ₒ', p: 'ₚ', r: 'ᵣ',
+      s: 'ₛ', t: 'ₜ', u: 'ᵤ', v: 'ᵥ', x: 'ₓ',
+      '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+    };
+
+    registerAlphabet('smallCaps', SMALL_CAPS, true);
+    registerAlphabet('superscript', SUPERSCRIPT, true);
+    registerAlphabet('subscript', SUBSCRIPT, true);
+  }
 
   /* ------------------------------------------------------------------
    * normalizeStyledText(text) -> { text, style } | null
@@ -150,7 +161,9 @@
    * ------------------------------------------------------------------ */
   function normalizeStyledText(input) {
     const text = String(input ?? '');
-    if (!text) return null;
+    if (!text || !HAS_FANCY_CANDIDATE_RE.test(text)) return null;
+
+    ensureTables();
 
     let styledCount = 0;
     let letterCount = 0;
@@ -191,6 +204,7 @@
   const KEEP_MARKS = new Set(['︎', '️', '⃣']);
 
   function applyStyleToText(input, styleId) {
+    ensureTables();
     const forward = FORWARD.get(styleId);
     if (!forward) return String(input ?? '');
 

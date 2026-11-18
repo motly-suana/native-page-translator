@@ -11,13 +11,16 @@ import * as pdfjsLib from './vendor/pdfjs/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdfjs/pdf.worker.min.mjs');
 
 const CHAR_CAP = 60000;          // cap tổng ký tự trích xuất — vượt thì dừng + banner.
-// Background chấp nhận 64 đoạn / 20000 ký tự mỗi request — gom sát trần (chừa
-// headroom) thay vì 25/12000, và chạy 3 batch song song. PDF vài trăm đoạn
-// trước đây đi tuần tự từng batch nhỏ nên chờ rất lâu.
-const BATCH_MAX_TEXTS = 48;      // tối đa đoạn mỗi batch dịch.
-const BATCH_MAX_CHARS = 15000;   // tối đa ký tự mỗi batch dịch.
-const BATCH_CONCURRENCY = 3;     // số batch chạy song song.
+// Wave 0 nhỏ để trang đầu hiển thị gần như tức thì, các wave sau tăng dần kích thước
+// tối ưu thông lượng qua worker pool song song.
+const FIRST_WAVE_MAX_TEXTS = 12; // batch đầu tiên cực gọn (Fast First Paint).
+const FIRST_WAVE_MAX_CHARS = 1800;
+const BATCH_MAX_TEXTS = 24;      // tối đa đoạn mỗi batch tiếp theo.
+const BATCH_MAX_CHARS = 4500;    // tối đa ký tự mỗi batch tiếp theo.
+const BATCH_CONCURRENCY = 4;     // số batch chạy song song.
 const Y_TOLERANCE = 2;           // gom item cùng dòng theo toạ độ y.
+let activeTranslateRun = 0;
+const activePdfRequestIds = new Set();
 
 const $ = selector => document.querySelector(selector);
 
@@ -147,6 +150,8 @@ function extractParagraphs(items) {
 }
 
 async function processPdf(data) {
+  activeTranslateRun++;
+  cancelPdfRequests();
   $('#emptyHint')?.remove();
   pages = [];
   // isEvalSupported:false — phòng thủ thứ hai cho CVE-2024-4367 (bản 4.3 đã vá gốc,
@@ -161,14 +166,19 @@ async function processPdf(data) {
     const textContent = await page.getTextContent();
     const extracted = extractParagraphs(textContent.items);
 
+    const MAX_PARA_CHARS = 18000;
     const paragraphs = [];
-    for (const text of extracted) {
-      if (totalChars + text.length > CHAR_CAP) {
-        truncated = true;
-        break;
+    for (const rawText of extracted) {
+      for (let offset = 0; offset < rawText.length; offset += MAX_PARA_CHARS) {
+        const text = rawText.slice(offset, offset + MAX_PARA_CHARS);
+        if (totalChars + text.length > CHAR_CAP) {
+          truncated = true;
+          break;
+        }
+        totalChars += text.length;
+        paragraphs.push({ original: text, translation: '' });
       }
-      totalChars += text.length;
-      paragraphs.push({ original: text, translation: '' });
+      if (truncated) break;
     }
     if (paragraphs.length) pages.push({ pageNumber, paragraphs });
     if (truncated) break;
@@ -187,12 +197,21 @@ async function processPdf(data) {
 
 /* ------------------------- Dịch theo batch ------------------------- */
 
+function cancelPdfRequests() {
+  if (!activePdfRequestIds.size) return;
+  const requestIds = [...activePdfRequestIds];
+  activePdfRequestIds.clear();
+  chrome.runtime.sendMessage({ type: 'cancelProviderTranslate', requestIds }).catch(() => {});
+}
+
 function buildBatches(pending) {
   const batches = [];
   let current = [];
   let chars = 0;
   for (const item of pending) {
-    if (current.length && (current.length >= BATCH_MAX_TEXTS || chars + item.text.length > BATCH_MAX_CHARS)) {
+    const maxTexts = batches.length === 0 ? FIRST_WAVE_MAX_TEXTS : BATCH_MAX_TEXTS;
+    const maxChars = batches.length === 0 ? FIRST_WAVE_MAX_CHARS : BATCH_MAX_CHARS;
+    if (current.length && (current.length >= maxTexts || chars + item.text.length > maxChars)) {
       batches.push(current);
       current = [];
       chars = 0;
@@ -205,6 +224,8 @@ function buildBatches(pending) {
 }
 
 async function translateAll() {
+  cancelPdfRequests();
+  const runId = ++activeTranslateRun;
   const targetLanguage = $('#targetLang').value;
   const pending = [];
   pages.forEach((page, pageIndex) => {
@@ -223,27 +244,35 @@ async function translateAll() {
   let failure = null;
 
   const runWorker = async () => {
-    while (cursor < batches.length && !failure) {
+    while (cursor < batches.length && !failure && runId === activeTranslateRun) {
       const batch = batches[cursor++];
+      const requestId = crypto.randomUUID();
+      activePdfRequestIds.add(requestId);
       const result = await chrome.runtime.sendMessage({
         type: 'providerTranslate',
         payload: {
           texts: batch.map(item => item.text),
           targetLanguage,
           sourceLanguage: 'auto',
-          requestId: crypto.randomUUID(),
+          requestId,
         },
       }).catch(error => ({ ok: false, error: error.message }));
+      activePdfRequestIds.delete(requestId);
+
+      if (runId !== activeTranslateRun) return;
 
       if (!result?.ok) {
         // Batch đầu tiên hỏng thì dừng cả lượt — các worker khác thấy cờ và thoát.
         failure = failure || (result?.error || 'lỗi không rõ');
+        cancelPdfRequests();
         return;
       }
 
       batch.forEach((item, index) => {
+        const para = pages[item.pageIndex]?.paragraphs?.[item.paraIndex];
+        if (!para) return;
         const text = result.translations?.[index] || '';
-        pages[item.pageIndex].paragraphs[item.paraIndex].translation = text;
+        para.translation = text;
         const el = document.getElementById(`trans-${pages[item.pageIndex].pageNumber}-${item.paraIndex}`);
         if (el) el.textContent = text || '…';
       });
@@ -256,6 +285,8 @@ async function translateAll() {
   await Promise.all(
     Array.from({ length: Math.min(BATCH_CONCURRENCY, batches.length) }, runWorker),
   );
+
+  if (runId !== activeTranslateRun) return;
 
   if (failure) {
     showError(
